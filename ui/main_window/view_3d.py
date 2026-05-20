@@ -10,7 +10,7 @@ View3D —— 基于 QOpenGLWidget 的 3D 渲染视图，用于"画柜子"模式
     - 鼠标左键拖拽：轨道旋转（Orbit）
     - 鼠标右键拖拽 / 中键拖拽：平移（Pan）
     - 滚轮：推进缩放（Dolly）
-    - 坐标轴指示器（左下角 X/Y/Z 小箭头）
+    - 坐标轴指示器（左下角 X/Y/Z 彩色轴线 + 箭头，随相机旋转）
 
 用法：
     from ui.main_window.view_3d import View3D
@@ -814,6 +814,93 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             painter.drawText(self._CABINET_SPACE_HINT_X, max(8, rect.top() - 44), line)
 
 
+    def _paint_axis_gizmo(self, painter: QPainter, ox: float, oy: float) -> None:
+        """左下角世界坐标轴指示器（随相机旋转；RGB 对应 X/Y/Z，带轴线与箭头）。"""
+        axis_len = 46.0
+        head_len = 11.0
+        head_half_w = 5.5
+        shaft_half_w = 1.6
+
+        az = math.radians(self._azimuth)
+        el = math.radians(self._elevation)
+        cos_az, sin_az = math.cos(az), math.sin(az)
+        cos_el, sin_el = math.cos(el), math.sin(el)
+
+        def mini_proj(dx: float, dy: float, dz: float) -> QPointF:
+            rx = dx * cos_az - dz * sin_az
+            rz = dx * sin_az + dz * cos_az
+            ry2 = dy * cos_el - rz * sin_el
+            return QPointF(ox + rx * axis_len, oy - ry2 * axis_len)
+
+        def axis_depth(dx: float, dy: float, dz: float) -> float:
+            rz = dx * sin_az + dz * cos_az
+            return dy * cos_el - rz * sin_el
+
+        axes = [
+            (1.0, 0.0, 0.0, QColor("#d93030"), "X"),
+            (0.0, 1.0, 0.0, QColor("#2dad52"), "Y"),
+            (0.0, 0.0, 1.0, QColor("#2b6fd4"), "Z"),
+        ]
+        origin = QPointF(ox, oy)
+
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 原点：小圆点，便于辨认三轴交点
+        painter.setPen(QPen(QColor(60, 60, 60, 200), 1.0))
+        painter.setBrush(QBrush(QColor(255, 255, 255, 235)))
+        painter.drawEllipse(origin, 3.5, 3.5)
+
+        label_font = QFont("Arial", 9, QFont.Weight.Bold)
+        painter.setFont(label_font)
+
+        for dx, dy, dz, color, lbl in sorted(axes, key=lambda a: axis_depth(a[0], a[1], a[2])):
+            tip = mini_proj(dx, dy, dz)
+            vx = tip.x() - origin.x()
+            vy = tip.y() - origin.y()
+            length = math.hypot(vx, vy)
+            if length < 1.0:
+                continue
+            ux, uy = vx / length, vy / length
+            px, py = -uy, ux
+            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
+
+            shaft = QPolygonF([
+                QPointF(origin.x() + px * shaft_half_w, origin.y() + py * shaft_half_w),
+                QPointF(origin.x() - px * shaft_half_w, origin.y() - py * shaft_half_w),
+                QPointF(base.x() - px * shaft_half_w, base.y() - py * shaft_half_w),
+                QPointF(base.x() + px * shaft_half_w, base.y() + py * shaft_half_w),
+            ])
+            head = QPolygonF([
+                tip,
+                QPointF(base.x() + px * head_half_w, base.y() + py * head_half_w),
+                QPointF(base.x() - px * head_half_w, base.y() - py * head_half_w),
+            ])
+
+            # 浅色描边，保证在渐变天空背景上仍清晰可见
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(255, 255, 255, 210)))
+            outline_shaft = QPolygonF([
+                QPointF(origin.x() + px * (shaft_half_w + 1.2), origin.y() + py * (shaft_half_w + 1.2)),
+                QPointF(origin.x() - px * (shaft_half_w + 1.2), origin.y() - py * (shaft_half_w + 1.2)),
+                QPointF(base.x() - px * (shaft_half_w + 1.2), base.y() - py * (shaft_half_w + 1.2)),
+                QPointF(base.x() + px * (shaft_half_w + 1.2), base.y() + py * (shaft_half_w + 1.2)),
+            ])
+            painter.drawPolygon(outline_shaft)
+
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(shaft)
+            painter.drawPolygon(head)
+
+            painter.setPen(QPen(color))
+            painter.drawText(
+                QPointF(tip.x() + ux * 5.0 - uy * 2.0, tip.y() + uy * 5.0 + ux * 2.0),
+                lbl,
+            )
+
+        painter.restore()
+
     def _paint_hud(self, painter: QPainter):
         """绘制左下角坐标轴指示器。"""
         cs = getattr(self, "_cabinet_space", None)
@@ -827,36 +914,7 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             f.setBold(True)
             painter.setFont(f)
             painter.drawText(self._CABINET_SPACE_HINT_X, 22, line)
-        # ── 左下角迷你轴线指示器 ──────────────────────────────────
-        ox, oy = 52, self.height() - 52
-        r = 36
-        az  = math.radians(self._azimuth)
-        el  = math.radians(self._elevation)
-        cos_az, sin_az = math.cos(az), math.sin(az)
-        cos_el, sin_el = math.cos(el), math.sin(el)
-
-        def mini_proj(dx, dy, dz):
-            rx  =  dx * cos_az - dz * sin_az
-            rz  =  dx * sin_az + dz * cos_az
-            ry2 =  dy * cos_el - rz * sin_el
-            sx  = ox + rx * r
-            sy  = oy - ry2 * r
-            return QPointF(sx, sy)
-
-        axes_def = [
-            ((1,0,0), QColor("#e05050"), "X"),
-            ((0,1,0), QColor("#50c070"), "Y"),
-            ((0,0,1), QColor("#5080e0"), "Z"),
-        ]
-        origin_p = QPointF(ox, oy)
-        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        for (dx,dy,dz), color, lbl in axes_def:
-            end_p = mini_proj(dx, dy, dz)
-            pen2 = QPen(color)
-            pen2.setWidthF(2.0)
-            painter.setPen(pen2)
-            painter.drawLine(origin_p, end_p)
-            painter.drawText(QPointF(end_p.x() + 2, end_p.y() + 4), lbl)
+        self._paint_axis_gizmo(painter, 52.0, float(self.height()) - 52.0)
 
     # ================================================================ 鼠标 / 键盘
     def mousePressEvent(self, event):
