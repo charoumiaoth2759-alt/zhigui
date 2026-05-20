@@ -75,6 +75,38 @@ def _exec_new_cabinet_dialog_for_total_size(parent: QWidget | None, project) -> 
     return True
 
 
+# 退出确认框按钮样式（与新建柜子对话框一致）
+_EXIT_CONFIRM_BTN_OK = """
+    QPushButton {
+        background: #2c3e50;
+        border: none;
+        border-radius: 4px;
+        color: #ffffff;
+        font-size: 13px;
+        font-weight: bold;
+        padding: 0 24px;
+        height: 32px;
+        min-width: 72px;
+    }
+    QPushButton:hover   { background: #1a2b3c; }
+    QPushButton:pressed { background: #0f1e2d; }
+"""
+_EXIT_CONFIRM_BTN_CANCEL = """
+    QPushButton {
+        background: #f4f6f8;
+        border: 1px solid #d0d5dd;
+        border-radius: 4px;
+        color: #606266;
+        font-size: 13px;
+        padding: 0 24px;
+        height: 32px;
+        min-width: 72px;
+    }
+    QPushButton:hover   { background: #e8f0fe; border-color: #4a6580; color: #303133; }
+    QPushButton:pressed { background: #d6e8ff; }
+"""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 柜体设计模式专属菜单栏（保留，供独立使用扩展）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -650,14 +682,18 @@ class CabinetDesignView(QWidget):
     def _confirm_and_exit(self) -> None:
         """菜单「退出」：确认后再退出柜体设计模式。"""
         parent = self._canvas or self.window()
-        reply = QMessageBox.question(
-            parent,
-            "退出柜体设计",
-            "确定要退出吗？",
+        box = QMessageBox(QMessageBox.Icon.Question, "退出柜体设计", "确定要退出吗？", parent)
+        box.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if reply == QMessageBox.StandardButton.Yes:
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        yes_btn = box.button(QMessageBox.StandardButton.Yes)
+        no_btn = box.button(QMessageBox.StandardButton.No)
+        yes_btn.setText("确定")
+        no_btn.setText("取消")
+        yes_btn.setStyleSheet(_EXIT_CONFIRM_BTN_OK)
+        no_btn.setStyleSheet(_EXIT_CONFIRM_BTN_CANCEL)
+        if box.exec() == QMessageBox.StandardButton.Yes:
             self.exit()
 
     def exit(self):
