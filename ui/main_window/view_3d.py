@@ -10,7 +10,7 @@ View3D —— 基于 QOpenGLWidget 的 3D 渲染视图，用于"画柜子"模式
     - 鼠标左键拖拽：轨道旋转（Orbit）
     - 鼠标右键拖拽 / 中键拖拽：平移（Pan）
     - 滚轮：推进缩放（Dolly）
-    - 坐标轴指示器（左下角 X/Y/Z 彩色轴线 + 箭头，随相机旋转）
+    - 坐标轴指示器（左下角 X/Y/Z 小箭头）
 
 用法：
     from ui.main_window.view_3d import View3D
@@ -21,7 +21,7 @@ View3D —— 基于 QOpenGLWidget 的 3D 渲染视图，用于"画柜子"模式
 import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, Signal
 from PySide6.QtGui import (
     QColor, QFont, QPainter, QPen, QBrush,
     QVector3D, QMatrix4x4, QOpenGLContext,
@@ -64,9 +64,9 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
     GRID_COUNT  = 20          # 单侧格数（总 2×GRID_COUNT）
     GRID_STEP   = 100.0       # 每格 100mm
     GRID_COLOR  = (0.88, 0.88, 0.88, 1.0)
-    AXIS_X_COLOR = (0.92, 0.18, 0.18)
-    AXIS_Y_COLOR = (0.18, 0.78, 0.28)
-    AXIS_Z_COLOR = (0.20, 0.42, 0.92)
+    AXIS_X_COLOR = (0.85, 0.25, 0.25)
+    AXIS_Y_COLOR = (0.25, 0.75, 0.30)
+    AXIS_Z_COLOR = (0.25, 0.45, 0.85)
 
     # ── 房间颜色 ─────────────────────────────────────────
     WALL_COLOR = (0.86, 0.86, 0.86, 1.0)
@@ -274,9 +274,6 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             # ── 室外：渐变地面 + 白色透视网格 ───────────────────────
             self._draw_outdoor_ground_and_grid_gl()
 
-            # ── 世界坐标轴（原点处 X/Y/Z 彩色粗线，与网格区分）────
-            self._draw_world_axes_gl()
-
             # ── 房间实体（背面剔除自动隐藏前墙）─────────────────
             self._draw_room_solid_gl()
 
@@ -385,8 +382,8 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 r = 0.62 + 0.18 * (1.0 - tc) + 0.12 * tr
                 g = 0.74 + 0.14 * (1.0 - tc) + 0.10 * tr
                 b = 0.88 + 0.08 * (1.0 - tc) + 0.04 * tr
-                a = 0.52 + 0.32 * tr + 0.12 * (1.0 - tc)
-                a = max(0.45, min(0.95, a))
+                a = 0.42 + 0.38 * tr + 0.15 * (1.0 - tc)
+                a = max(0.35, min(0.95, a))
                 GL.glColor4f(r, g, b, a)
 
             GL.glLineWidth(1.0)
@@ -406,20 +403,6 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 GL.glVertex3f(gx1, 0.04, z)
                 z += step
             GL.glEnd()
-
-            # 过原点的 X/Z 地面参考线：加粗、纯色，避免与普通网格混淆
-            ax_y = 0.06
-            ax_span = min(max(half * 0.35, 4000.0), 80_000.0)
-            GL.glLineWidth(2.8)
-            GL.glBegin(GL.GL_LINES)
-            GL.glColor4f(*self.AXIS_X_COLOR, 1.0)
-            GL.glVertex3f(cx - ax_span, ax_y, cz)
-            GL.glVertex3f(cx + ax_span, ax_y, cz)
-            GL.glColor4f(*self.AXIS_Z_COLOR, 1.0)
-            GL.glVertex3f(cx, ax_y, cz - ax_span)
-            GL.glVertex3f(cx, ax_y, cz + ax_span)
-            GL.glEnd()
-            GL.glLineWidth(1.0)
             GL.glEnable(GL.GL_CULL_FACE)
 
         # ── GL 辅助 ───────────────────────────────────────────────
@@ -458,41 +441,6 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 1,
             ]
             GL.glLoadMatrixf(m)
-
-        def _draw_world_axes_gl(self) -> None:
-            """在观察目标附近绘制 X/Y/Z 世界坐标轴（粗线、高饱和，便于与淡色网格区分）。"""
-            ox = float(self._target.x())
-            oy = 0.0
-            oz = float(self._target.z())
-            span_h = max(
-                float(self._distance) * 0.45,
-                self.GRID_STEP * 10.0,
-                1200.0,
-            )
-            span_h = min(span_h, 15_000.0)
-            span_v = max(
-                float(self._extrude_height) * 1.05,
-                span_h * 0.35,
-                800.0,
-            )
-            span_v = min(span_v, 12_000.0)
-
-            GL.glDisable(GL.GL_CULL_FACE)
-            GL.glDisable(GL.GL_BLEND)
-            GL.glLineWidth(4.0)
-            GL.glBegin(GL.GL_LINES)
-            GL.glColor3f(*self.AXIS_X_COLOR)
-            GL.glVertex3f(ox - span_h, oy, oz)
-            GL.glVertex3f(ox + span_h, oy, oz)
-            GL.glColor3f(*self.AXIS_Y_COLOR)
-            GL.glVertex3f(ox, oy, oz)
-            GL.glVertex3f(ox, oy + span_v, oz)
-            GL.glColor3f(*self.AXIS_Z_COLOR)
-            GL.glVertex3f(ox, oy, oz - span_h)
-            GL.glVertex3f(ox, oy, oz + span_h)
-            GL.glEnd()
-            GL.glLineWidth(1.0)
-            GL.glEnable(GL.GL_BLEND)
 
         def _draw_room_walls_gl(self):
             """仅线框绘制墙体轮廓（底边 / 顶边 / 竖边）。"""
@@ -761,15 +709,10 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
 
         def _draw_overlay_painter(self):
             """用 QPainter 在 GL 画面上叠加左下角坐标轴指示器和提示文字。"""
-            # 混合/深度会影响 QPainter 在 FBO 上的绘制；叠加 HUD 前复位
-            GL.glDisable(GL.GL_DEPTH_TEST)
-            GL.glDisable(GL.GL_BLEND)
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._paint_hud(painter)
             painter.end()
-            GL.glEnable(GL.GL_BLEND)
-            GL.glEnable(GL.GL_DEPTH_TEST)
 
     # ================================================================ 软渲染路径（无 OpenGL）
     def paintEvent(self, event):
@@ -855,97 +798,6 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             painter.drawText(self._CABINET_SPACE_HINT_X, max(8, rect.top() - 44), line)
 
 
-    def _paint_axis_gizmo(self, painter: QPainter, ox: float, oy: float) -> None:
-        """左下角世界坐标轴指示器（随相机旋转；RGB 对应 X/Y/Z，带轴线与箭头）。"""
-        axis_len = 52.0
-        head_len = 12.0
-        line_w = 4.0
-
-        az = math.radians(self._azimuth)
-        el = math.radians(self._elevation)
-        cos_az, sin_az = math.cos(az), math.sin(az)
-        cos_el, sin_el = math.cos(el), math.sin(el)
-
-        def mini_proj(dx: float, dy: float, dz: float) -> QPointF:
-            rx = dx * cos_az - dz * sin_az
-            rz = dx * sin_az + dz * cos_az
-            ry2 = dy * cos_el - rz * sin_el
-            return QPointF(ox + rx * axis_len, oy - ry2 * axis_len)
-
-        def axis_depth(dx: float, dy: float, dz: float) -> float:
-            rz = dx * sin_az + dz * cos_az
-            return dy * cos_el - rz * sin_el
-
-        axes = [
-            (1.0, 0.0, 0.0, QColor("#d93030"), "X"),
-            (0.0, 1.0, 0.0, QColor("#2dad52"), "Y"),
-            (0.0, 0.0, 1.0, QColor("#2b6fd4"), "Z"),
-        ]
-        origin = QPointF(ox, oy)
-
-        painter.save()
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        # 半透明底衬，提高在浅蓝渐变背景上的对比度
-        pad = 14.0
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(255, 255, 255, 245)))
-        painter.drawRoundedRect(
-            QRectF(ox - pad, oy - axis_len - pad, axis_len + pad * 2, axis_len + pad * 2),
-            6.0,
-            6.0,
-        )
-
-        # 原点：小圆点，便于辨认三轴交点
-        painter.setPen(QPen(QColor(40, 40, 40), 1.2))
-        painter.setBrush(QBrush(QColor(255, 255, 255)))
-        painter.drawEllipse(origin, 4.0, 4.0)
-
-        label_font = QFont("Arial", 10, QFont.Weight.Bold)
-        painter.setFont(label_font)
-
-        for dx, dy, dz, color, lbl in sorted(axes, key=lambda a: axis_depth(a[0], a[1], a[2])):
-            tip = mini_proj(dx, dy, dz)
-            vx = tip.x() - origin.x()
-            vy = tip.y() - origin.y()
-            length = math.hypot(vx, vy)
-            if length < 1.0:
-                continue
-            ux, uy = vx / length, vy / length
-            px, py = -uy, ux
-            base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
-
-            # 白描边 + 彩色粗线（不透明），避免 QOpenGLWidget 上半透明填充不显示
-            outline_pen = QPen(QColor(255, 255, 255), line_w + 2.6)
-            outline_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(outline_pen)
-            painter.drawLine(origin, base)
-
-            axis_pen = QPen(color, line_w)
-            axis_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            axis_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(axis_pen)
-            painter.drawLine(origin, base)
-
-            head = QPolygonF([
-                tip,
-                QPointF(base.x() + px * 6.0, base.y() + py * 6.0),
-                QPointF(base.x() - px * 6.0, base.y() - py * 6.0),
-            ])
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(color))
-            painter.drawPolygon(head)
-
-            painter.setPen(QPen(color.darker(115), 1.0))
-            painter.drawText(
-                QPointF(tip.x() + ux * 6.0 - uy * 2.0, tip.y() + uy * 6.0 + ux * 2.0),
-                lbl,
-            )
-
-        painter.restore()
-
     def _paint_hud(self, painter: QPainter):
         """绘制左下角坐标轴指示器。"""
         cs = getattr(self, "_cabinet_space", None)
@@ -959,7 +811,36 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             f.setBold(True)
             painter.setFont(f)
             painter.drawText(self._CABINET_SPACE_HINT_X, 22, line)
-        self._paint_axis_gizmo(painter, 52.0, float(self.height()) - 52.0)
+        # ── 左下角迷你轴线指示器（X 红 / Y 绿 / Z 蓝，随相机旋转）──
+        ox, oy = 52, self.height() - 52
+        r = 36
+        az = math.radians(self._azimuth)
+        el = math.radians(self._elevation)
+        cos_az, sin_az = math.cos(az), math.sin(az)
+        cos_el, sin_el = math.cos(el), math.sin(el)
+
+        def mini_proj(dx, dy, dz):
+            rx = dx * cos_az - dz * sin_az
+            rz = dx * sin_az + dz * cos_az
+            ry2 = dy * cos_el - rz * sin_el
+            sx = ox + rx * r
+            sy = oy - ry2 * r
+            return QPointF(sx, sy)
+
+        axes_def = [
+            ((1, 0, 0), QColor("#e05050"), "X"),
+            ((0, 1, 0), QColor("#50c070"), "Y"),
+            ((0, 0, 1), QColor("#5080e0"), "Z"),
+        ]
+        origin_p = QPointF(ox, oy)
+        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        for (dx, dy, dz), color, lbl in axes_def:
+            end_p = mini_proj(dx, dy, dz)
+            pen2 = QPen(color)
+            pen2.setWidthF(2.0)
+            painter.setPen(pen2)
+            painter.drawLine(origin_p, end_p)
+            painter.drawText(QPointF(end_p.x() + 2, end_p.y() + 4), lbl)
 
     # ================================================================ 鼠标 / 键盘
     def mousePressEvent(self, event):
