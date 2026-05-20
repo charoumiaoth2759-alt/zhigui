@@ -682,7 +682,12 @@ class CabinetDesignView(QWidget):
     def _confirm_and_exit(self) -> None:
         """菜单「退出」：确认后再退出柜体设计模式。"""
         parent = self._canvas or self.window()
-        box = QMessageBox(QMessageBox.Icon.Question, "退出柜体设计", "确定要退出吗？", parent)
+        box = QMessageBox(
+            QMessageBox.Icon.Question,
+            "退出柜体设计",
+            "确定要退出吗？",
+            parent=parent,
+        )
         box.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
