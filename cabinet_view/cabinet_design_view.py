@@ -31,7 +31,7 @@ from PySide6.QtGui import (
     QAction, QBrush, QColor, QFont, QPainter, QPen, QPolygonF,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMenu, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget, QDialog,
 )
 
@@ -571,7 +571,7 @@ class CabinetDesignView(QWidget):
         for title in self._CABINET_EXTRA_TITLES:
             act = QAction(title, menu_bar)
             if title == "退出":
-                act.triggered.connect(self.exit)
+                act.triggered.connect(self._confirm_and_exit)
             elif title == "设置":
                 # 柜体设计模式顶部菜单「设置」→ 与主窗口相同的系统参数对话框
                 act.triggered.connect(self._open_system_param_dialog)
@@ -646,6 +646,19 @@ class CabinetDesignView(QWidget):
             f"{getattr(project,'cabinet_width','—')} × "
             f"{getattr(project,'cabinet_height','—')} × "
             f"{getattr(project,'cabinet_depth','—')} mm", 5000)
+
+    def _confirm_and_exit(self) -> None:
+        """菜单「退出」：确认后再退出柜体设计模式。"""
+        parent = self._canvas or self.window()
+        reply = QMessageBox.question(
+            parent,
+            "退出柜体设计",
+            "确定要退出吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.exit()
 
     def exit(self):
         """退出柜体设计模式，发射 sig_finish 通知主窗口。"""
