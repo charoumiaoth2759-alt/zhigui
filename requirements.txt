@@ -1,0 +1,7 @@
+# 智柜 V2026 — Python 依赖（节选）
+# 安装：pip install -r requirements.txt
+
+PySide6>=6.5
+numpy>=1.23
+PyOpenGL>=3.1.0
+pyqtgraph>=0.13.3
