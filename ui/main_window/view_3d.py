@@ -21,7 +21,7 @@ View3D —— 基于 QOpenGLWidget 的 3D 渲染视图，用于"画柜子"模式
 import math
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPoint, QPointF, Signal
+from PySide6.QtCore import Qt, QPoint, QPointF, QRectF, Signal
 from PySide6.QtGui import (
     QColor, QFont, QPainter, QPen, QBrush,
     QVector3D, QMatrix4x4, QOpenGLContext,
@@ -64,9 +64,9 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
     GRID_COUNT  = 20          # 单侧格数（总 2×GRID_COUNT）
     GRID_STEP   = 100.0       # 每格 100mm
     GRID_COLOR  = (0.88, 0.88, 0.88, 1.0)
-    AXIS_X_COLOR = (0.85, 0.25, 0.25)
-    AXIS_Y_COLOR = (0.25, 0.75, 0.30)
-    AXIS_Z_COLOR = (0.25, 0.45, 0.85)
+    AXIS_X_COLOR = (0.92, 0.18, 0.18)
+    AXIS_Y_COLOR = (0.18, 0.78, 0.28)
+    AXIS_Z_COLOR = (0.20, 0.42, 0.92)
 
     # ── 房间颜色 ─────────────────────────────────────────
     WALL_COLOR = (0.86, 0.86, 0.86, 1.0)
@@ -274,6 +274,9 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             # ── 室外：渐变地面 + 白色透视网格 ───────────────────────
             self._draw_outdoor_ground_and_grid_gl()
 
+            # ── 世界坐标轴（原点处 X/Y/Z 彩色粗线，与网格区分）────
+            self._draw_world_axes_gl()
+
             # ── 房间实体（背面剔除自动隐藏前墙）─────────────────
             self._draw_room_solid_gl()
 
@@ -382,8 +385,8 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 r = 0.62 + 0.18 * (1.0 - tc) + 0.12 * tr
                 g = 0.74 + 0.14 * (1.0 - tc) + 0.10 * tr
                 b = 0.88 + 0.08 * (1.0 - tc) + 0.04 * tr
-                a = 0.42 + 0.38 * tr + 0.15 * (1.0 - tc)
-                a = max(0.35, min(0.95, a))
+                a = 0.52 + 0.32 * tr + 0.12 * (1.0 - tc)
+                a = max(0.45, min(0.95, a))
                 GL.glColor4f(r, g, b, a)
 
             GL.glLineWidth(1.0)
@@ -403,6 +406,20 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 GL.glVertex3f(gx1, 0.04, z)
                 z += step
             GL.glEnd()
+
+            # 过原点的 X/Z 地面参考线：加粗、纯色，避免与普通网格混淆
+            ax_y = 0.06
+            ax_span = min(max(half * 0.35, 4000.0), 80_000.0)
+            GL.glLineWidth(2.8)
+            GL.glBegin(GL.GL_LINES)
+            GL.glColor4f(*self.AXIS_X_COLOR, 1.0)
+            GL.glVertex3f(cx - ax_span, ax_y, cz)
+            GL.glVertex3f(cx + ax_span, ax_y, cz)
+            GL.glColor4f(*self.AXIS_Z_COLOR, 1.0)
+            GL.glVertex3f(cx, ax_y, cz - ax_span)
+            GL.glVertex3f(cx, ax_y, cz + ax_span)
+            GL.glEnd()
+            GL.glLineWidth(1.0)
             GL.glEnable(GL.GL_CULL_FACE)
 
         # ── GL 辅助 ───────────────────────────────────────────────
@@ -442,21 +459,40 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             ]
             GL.glLoadMatrixf(m)
 
-        def _draw_axes_gl(self):
-            length = self.GRID_STEP * 3
-            GL.glLineWidth(2.0)
+        def _draw_world_axes_gl(self) -> None:
+            """在观察目标附近绘制 X/Y/Z 世界坐标轴（粗线、高饱和，便于与淡色网格区分）。"""
+            ox = float(self._target.x())
+            oy = 0.0
+            oz = float(self._target.z())
+            span_h = max(
+                float(self._distance) * 0.45,
+                self.GRID_STEP * 10.0,
+                1200.0,
+            )
+            span_h = min(span_h, 15_000.0)
+            span_v = max(
+                float(self._extrude_height) * 1.05,
+                span_h * 0.35,
+                800.0,
+            )
+            span_v = min(span_v, 12_000.0)
+
+            GL.glDisable(GL.GL_CULL_FACE)
+            GL.glDisable(GL.GL_BLEND)
+            GL.glLineWidth(4.0)
             GL.glBegin(GL.GL_LINES)
-            # X 轴 → 红
             GL.glColor3f(*self.AXIS_X_COLOR)
-            GL.glVertex3f(0, 0, 0); GL.glVertex3f(length, 0, 0)
-            # Y 轴 → 绿
+            GL.glVertex3f(ox - span_h, oy, oz)
+            GL.glVertex3f(ox + span_h, oy, oz)
             GL.glColor3f(*self.AXIS_Y_COLOR)
-            GL.glVertex3f(0, 0, 0); GL.glVertex3f(0, length, 0)
-            # Z 轴 → 蓝
+            GL.glVertex3f(ox, oy, oz)
+            GL.glVertex3f(ox, oy + span_v, oz)
             GL.glColor3f(*self.AXIS_Z_COLOR)
-            GL.glVertex3f(0, 0, 0); GL.glVertex3f(0, 0, length)
+            GL.glVertex3f(ox, oy, oz - span_h)
+            GL.glVertex3f(ox, oy, oz + span_h)
             GL.glEnd()
             GL.glLineWidth(1.0)
+            GL.glEnable(GL.GL_BLEND)
 
         def _draw_room_walls_gl(self):
             """仅线框绘制墙体轮廓（底边 / 顶边 / 竖边）。"""
@@ -725,10 +761,15 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
 
         def _draw_overlay_painter(self):
             """用 QPainter 在 GL 画面上叠加左下角坐标轴指示器和提示文字。"""
+            # 混合/深度会影响 QPainter 在 FBO 上的绘制；叠加 HUD 前复位
+            GL.glDisable(GL.GL_DEPTH_TEST)
+            GL.glDisable(GL.GL_BLEND)
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._paint_hud(painter)
             painter.end()
+            GL.glEnable(GL.GL_BLEND)
+            GL.glEnable(GL.GL_DEPTH_TEST)
 
     # ================================================================ 软渲染路径（无 OpenGL）
     def paintEvent(self, event):
@@ -816,10 +857,9 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
 
     def _paint_axis_gizmo(self, painter: QPainter, ox: float, oy: float) -> None:
         """左下角世界坐标轴指示器（随相机旋转；RGB 对应 X/Y/Z，带轴线与箭头）。"""
-        axis_len = 46.0
-        head_len = 11.0
-        head_half_w = 5.5
-        shaft_half_w = 1.6
+        axis_len = 52.0
+        head_len = 12.0
+        line_w = 4.0
 
         az = math.radians(self._azimuth)
         el = math.radians(self._elevation)
@@ -847,12 +887,22 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        # 原点：小圆点，便于辨认三轴交点
-        painter.setPen(QPen(QColor(60, 60, 60, 200), 1.0))
-        painter.setBrush(QBrush(QColor(255, 255, 255, 235)))
-        painter.drawEllipse(origin, 3.5, 3.5)
+        # 半透明底衬，提高在浅蓝渐变背景上的对比度
+        pad = 14.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(255, 255, 255, 245)))
+        painter.drawRoundedRect(
+            QRectF(ox - pad, oy - axis_len - pad, axis_len + pad * 2, axis_len + pad * 2),
+            6.0,
+            6.0,
+        )
 
-        label_font = QFont("Arial", 9, QFont.Weight.Bold)
+        # 原点：小圆点，便于辨认三轴交点
+        painter.setPen(QPen(QColor(40, 40, 40), 1.2))
+        painter.setBrush(QBrush(QColor(255, 255, 255)))
+        painter.drawEllipse(origin, 4.0, 4.0)
+
+        label_font = QFont("Arial", 10, QFont.Weight.Bold)
         painter.setFont(label_font)
 
         for dx, dy, dz, color, lbl in sorted(axes, key=lambda a: axis_depth(a[0], a[1], a[2])):
@@ -866,36 +916,31 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             px, py = -uy, ux
             base = QPointF(tip.x() - ux * head_len, tip.y() - uy * head_len)
 
-            shaft = QPolygonF([
-                QPointF(origin.x() + px * shaft_half_w, origin.y() + py * shaft_half_w),
-                QPointF(origin.x() - px * shaft_half_w, origin.y() - py * shaft_half_w),
-                QPointF(base.x() - px * shaft_half_w, base.y() - py * shaft_half_w),
-                QPointF(base.x() + px * shaft_half_w, base.y() + py * shaft_half_w),
-            ])
+            # 白描边 + 彩色粗线（不透明），避免 QOpenGLWidget 上半透明填充不显示
+            outline_pen = QPen(QColor(255, 255, 255), line_w + 2.6)
+            outline_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(outline_pen)
+            painter.drawLine(origin, base)
+
+            axis_pen = QPen(color, line_w)
+            axis_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            axis_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(axis_pen)
+            painter.drawLine(origin, base)
+
             head = QPolygonF([
                 tip,
-                QPointF(base.x() + px * head_half_w, base.y() + py * head_half_w),
-                QPointF(base.x() - px * head_half_w, base.y() - py * head_half_w),
+                QPointF(base.x() + px * 6.0, base.y() + py * 6.0),
+                QPointF(base.x() - px * 6.0, base.y() - py * 6.0),
             ])
-
-            # 浅色描边，保证在渐变天空背景上仍清晰可见
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor(255, 255, 255, 210)))
-            outline_shaft = QPolygonF([
-                QPointF(origin.x() + px * (shaft_half_w + 1.2), origin.y() + py * (shaft_half_w + 1.2)),
-                QPointF(origin.x() - px * (shaft_half_w + 1.2), origin.y() - py * (shaft_half_w + 1.2)),
-                QPointF(base.x() - px * (shaft_half_w + 1.2), base.y() - py * (shaft_half_w + 1.2)),
-                QPointF(base.x() + px * (shaft_half_w + 1.2), base.y() + py * (shaft_half_w + 1.2)),
-            ])
-            painter.drawPolygon(outline_shaft)
-
             painter.setBrush(QBrush(color))
-            painter.drawPolygon(shaft)
             painter.drawPolygon(head)
 
-            painter.setPen(QPen(color))
+            painter.setPen(QPen(color.darker(115), 1.0))
             painter.drawText(
-                QPointF(tip.x() + ux * 5.0 - uy * 2.0, tip.y() + uy * 5.0 + ux * 2.0),
+                QPointF(tip.x() + ux * 6.0 - uy * 2.0, tip.y() + uy * 6.0 + ux * 2.0),
                 lbl,
             )
 
