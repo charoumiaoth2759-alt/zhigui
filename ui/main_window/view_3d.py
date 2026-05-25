@@ -1398,6 +1398,9 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             from core.space.tree import walk_dfs
 
             for node in walk_dfs(root):
+                # 仅绘制叶子空间：父级 split 盒体会与子空间重叠，造成“未更新/重复高亮”的观感。
+                if getattr(node, "children", None):
+                    continue
                 self._draw_cabinet_space_node_gl(node)
 
         def _draw_cabinet_space_node_gl(self, space: object) -> None:
