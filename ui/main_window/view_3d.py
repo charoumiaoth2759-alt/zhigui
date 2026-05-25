@@ -217,6 +217,8 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
 
     # 线框 / 板件黑棱等边线线宽（≤2，避免部分 GPU 异常）
     _EDGE_LINE_WIDTH = 1.2
+    _ENABLE_CAMERA_ORBIT = False  # 画柜子模式禁用左键轨道旋转
+    _SHOW_COORDINATE_AXES = False  # 隐藏 3D 视图中的坐标线（世界轴 + 左下角坐标轴 HUD）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -965,7 +967,8 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 self._draw_outdoor_ground_and_grid_gl()
 
             # ── 世界坐标轴 X/Y/Z（原点出发的三向线）──────────────
-            self._draw_world_axes_gl()
+            if self._SHOW_COORDINATE_AXES:
+                self._draw_world_axes_gl()
 
             # ── 房间实体：用户墙与地面（背面剔除自动隐藏前墙）─────────────
             if self._show_user_floorplan_environment:
@@ -979,7 +982,8 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             self._draw_generated_panels_gl()
 
             # ── 左下角坐标轴 HUD ──────────────────────────────────
-            self._draw_overlay_painter()
+            if self._SHOW_COORDINATE_AXES:
+                self._draw_overlay_painter()
 
         def _draw_background_painter(self):
             """画布内天顶明显浅蓝 → 下方渐变为白的竖直线性渐变（默认 3D 天空）。"""
@@ -1828,11 +1832,12 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         if self.pending_click and self.mouse_press_pos is not None:
             delta = (curr - self.mouse_press_pos).manhattanLength()
             if delta > self.rotate_threshold:
-                self.is_rotating = True
                 self.pending_click = False
-                self._drag_mode = "orbit"
-                self._last_pos = curr
-                print("[INPUT] drag rotate detected", flush=True)
+                if self._ENABLE_CAMERA_ORBIT:
+                    self.is_rotating = True
+                    self._drag_mode = "orbit"
+                    self._last_pos = curr
+                    print("[INPUT] drag rotate detected", flush=True)
 
         if self.is_rotating:
             self._rotate_camera(curr)
