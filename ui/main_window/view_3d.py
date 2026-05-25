@@ -964,17 +964,12 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             if self._show_user_floorplan_environment:
                 self._draw_outdoor_ground_and_grid_gl()
 
-<<<<<<< HEAD
-            # ── 房间实体：用户墙与地面（背面剔除自动隐藏前墙）─────────────
-            if self._show_user_floorplan_environment:
-                self._draw_room_solid_gl()
-=======
             # ── 世界坐标轴 X/Y/Z（原点出发的三向线）──────────────
             self._draw_world_axes_gl()
 
-            # ── 房间实体（背面剔除自动隐藏前墙）─────────────────
-            self._draw_room_solid_gl()
->>>>>>> 6ac2b0c32247173399eb7d86a98369b46184abb6
+            # ── 房间实体：用户墙与地面（背面剔除自动隐藏前墙）─────────────
+            if self._show_user_floorplan_environment:
+                self._draw_room_solid_gl()
 
             # ── 柜体逻辑空间根盒（浅青半透明填充 + 纯青棱线）──
             self._draw_cabinet_space_gl()
