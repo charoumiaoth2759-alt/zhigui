@@ -251,6 +251,8 @@ class SpaceVisual:
     # 与 View3D 逻辑空间盒一致：QColor(135,240,240,153) 约 60% 透明；棱线 QColor(0,255,255)
     _FACE_RGBA = (135 / 255.0, 240 / 255.0, 240 / 255.0, 153 / 255.0)
     _EDGE_RGBA = (0.0, 1.0, 1.0, 1.0)
+    _OCCUPIED_FACE_RGBA = (35 / 255.0, 100 / 255.0, 230 / 255.0, 60 / 255.0)
+    _OCCUPIED_EDGE_RGBA = (35 / 255.0, 100 / 255.0, 230 / 255.0, 1.0)
 
     def __init__(self, space: Space):
         self.space = space
@@ -271,12 +273,33 @@ class SpaceVisual:
             if pick is PickSpaceState.OCCUPIED
             else None
         )
-        return space_box_face_edge_rgba(
+        face_edge = space_box_face_edge_rgba(
             pick,
             placement,
             hovered=self._hover_highlight,
             cabinet_ops_user_allow=cab_allow,
         )
+        should_log = (
+            DEBUG_VIEW3D
+            and pick is PickSpaceState.OCCUPIED
+            and not self._hover_highlight
+            and cab_allow is not True
+            and face_edge
+            != (self._OCCUPIED_FACE_RGBA, self._OCCUPIED_EDGE_RGBA)
+        )
+        if should_log:
+            sid = str(getattr(self.space, "id", ""))
+            print(
+                "[SpaceColorDebug:UnexpectedOccupiedColor]",
+                f"space_id={sid}",
+                f"pick_state={getattr(pick, 'name', pick)}",
+                f"placement={getattr(placement, 'name', placement)}",
+                f"hovered={self._hover_highlight}",
+                f"cabinet_ops_user_allow={cab_allow}",
+                f"face_rgba={face_edge[0]}",
+                f"edge_rgba={face_edge[1]}",
+            )
+        return face_edge
 
     def refresh_box_style(self, gl_view) -> None:
         """按当前 ``Space`` 拾取语义 + metadata 放置决策 + 悬停，重画逻辑盒颜色。"""
