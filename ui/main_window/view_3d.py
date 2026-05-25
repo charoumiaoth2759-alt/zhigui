@@ -1711,14 +1711,12 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 self._pressed_hover_face,
                 flush=True,
             )
+            # 左键拖拽旋转不应依赖 hover 命中；即使当前没命中面，也允许进入 orbit 检测。
+            self.pending_click = True
+            self.is_rotating = False
             if not self._pressed_hover_space_id or self._pressed_hover_face is None:
-                self.pending_click = False
-                self.is_rotating = False
                 self._pressed_hover_face = None
                 self._pressed_hover_space_id = None
-            else:
-                self.pending_click = True
-                self.is_rotating = False
 
         if (
             event.button() == Qt.MouseButton.LeftButton
