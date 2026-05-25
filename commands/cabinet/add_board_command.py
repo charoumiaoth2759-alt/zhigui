@@ -104,9 +104,24 @@ def _rebuild_after_split(
     cabinet: dict[str, Any], space: Space, anchor: Space | None
 ) -> None:
     from core.space.space_consistency_manager import rebuild_after_solver
+    from core.space.tree import walk_dfs
 
     root = _resolve_root(cabinet, space)
+    anchor_id = str(getattr(anchor, "id", "") or "")
+    space_id = str(getattr(space, "id", "") or "")
+    root_id = str(getattr(root, "id", "") or "")
+    node_count = sum(1 for _ in walk_dfs(root))
+    print(
+        "[REBUILD_AFTER_SPLIT:before] "
+        f"space_id={space_id!r} anchor_id={anchor_id!r} "
+        f"root_id={root_id!r} root_obj={id(root)} nodes={node_count}"
+    )
     rebuild_after_solver(root=root, ctx=cabinet)
+    node_count_after = sum(1 for _ in walk_dfs(root))
+    print(
+        "[REBUILD_AFTER_SPLIT:after] "
+        f"root_id={root_id!r} root_obj={id(root)} nodes={node_count_after}"
+    )
 
 
 def _resolve_mount_space(

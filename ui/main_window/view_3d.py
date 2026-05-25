@@ -1403,6 +1403,15 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         def _draw_cabinet_space_node_gl(self, space: object) -> None:
             """绘制单个逻辑空间盒。"""
             pick = infer_space_state(space)
+            from core.space.space_occupancy import read_space_occupancy
+
+            occ = read_space_occupancy(space)
+            print(
+                "[DRAW] "
+                f"space={getattr(space, 'id', '?')!r} "
+                f"pick={getattr(pick, 'value', pick)!r} occ={getattr(occ, 'value', occ)!r} "
+                f"space_obj={id(space)} root_obj={id(getattr(space, 'root', space))}"
+            )
             placement = read_ui_placement_for_space_display(space)
             cab_allow = (
                 read_cabinet_ops_user_allow(space)
