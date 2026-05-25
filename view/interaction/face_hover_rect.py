@@ -19,7 +19,7 @@ from core.space.space_models import Space
 WorldToScreenFn = Callable[[float, float, float], tuple[float, float] | None]
 
 LEFT_FACE_HOVER_RECT_WIDTH_PX = 14.0
-RIGHT_FACE_HOVER_RECT_WIDTH_PX = 20.0  # 右侧略宽，补偿视角不对称
+RIGHT_FACE_HOVER_RECT_WIDTH_PX = 28.0  # 右侧再放宽：透视下更易“擦边 miss”
 
 FACE_HOVER_RECT_WIDTH_PX: dict[FaceType, float] = {
     FaceType.LEFT: LEFT_FACE_HOVER_RECT_WIDTH_PX,
