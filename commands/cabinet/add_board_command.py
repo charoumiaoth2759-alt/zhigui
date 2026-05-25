@@ -119,6 +119,20 @@ def _resolve_mount_space(
     return attachment
 
 
+def _resolve_live_space_by_id(cabinet: dict[str, Any], space: Space) -> Space:
+    """
+    通过 ``space.id`` 重新解析当前树中的活体节点，避免切分/重建后写到旧对象。
+    """
+    sid = str(getattr(space, "id", "") or "")
+    if not sid:
+        return space
+    finder = cabinet_find_space_callable(cabinet)
+    if finder is None:
+        return space
+    found = finder(sid)
+    return found if isinstance(found, Space) else space
+
+
 def _prepare_panel_for_mount(
     panel: Panel,
     mount_space: Space,
@@ -334,6 +348,7 @@ class AddBoardCommand(BaseCommand):
                 self._mount_space = space
             _sync_cabinet_boards_with_space_tree(self._cabinet, panel)
             lock_target = self._mount_space or space
+            lock_target = _resolve_live_space_by_id(self._cabinet, lock_target)
             reset_cabinet_ops_visual_to_locked_after_panel_added(lock_target)
             from ui.interaction.interaction_log import log_command
 
