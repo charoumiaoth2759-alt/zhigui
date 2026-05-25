@@ -964,9 +964,17 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             if self._show_user_floorplan_environment:
                 self._draw_outdoor_ground_and_grid_gl()
 
+<<<<<<< HEAD
             # ── 房间实体：用户墙与地面（背面剔除自动隐藏前墙）─────────────
             if self._show_user_floorplan_environment:
                 self._draw_room_solid_gl()
+=======
+            # ── 世界坐标轴 X/Y/Z（原点出发的三向线）──────────────
+            self._draw_world_axes_gl()
+
+            # ── 房间实体（背面剔除自动隐藏前墙）─────────────────
+            self._draw_room_solid_gl()
+>>>>>>> 6ac2b0c32247173399eb7d86a98369b46184abb6
 
             # ── 柜体逻辑空间根盒（浅青半透明填充 + 纯青棱线）──
             self._draw_cabinet_space_gl()
@@ -1098,6 +1106,46 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 GL.glVertex3f(gx1, 0.04, z)
                 z += step
             GL.glEnd()
+            GL.glEnable(GL.GL_CULL_FACE)
+
+        def _world_axis_length(self) -> float:
+            """世界坐标轴长度（mm），随场景尺度自适应。"""
+            span = 3000.0
+            cs = getattr(self, "_cabinet_space", None)
+            if cs is not None:
+                span = max(
+                    float(cs.width), float(cs.height), float(cs.depth), span,
+                )
+            room = getattr(self, "_room", None)
+            if room and room.walls:
+                xs: list[float] = []
+                zs: list[float] = []
+                for w in room.walls:
+                    for px, pz in w.wall_polygon_points():
+                        xs.append(float(px))
+                        zs.append(float(pz))
+                if xs:
+                    span = max(max(xs) - min(xs), max(zs) - min(zs), span)
+            return max(min(span * 0.45, 12_000.0), 1_800.0)
+
+        def _draw_world_axes_gl(self) -> None:
+            """在场景原点绘制 X/Y/Z 世界坐标轴线（红/绿/蓝）。"""
+            length = self._world_axis_length()
+            GL.glDisable(GL.GL_TEXTURE_2D)
+            GL.glDisable(GL.GL_CULL_FACE)
+            GL.glLineWidth(2.5)
+            axes = (
+                (self.AXIS_X_COLOR, length, 0.0, 0.0),
+                (self.AXIS_Y_COLOR, 0.0, length, 0.0),
+                (self.AXIS_Z_COLOR, 0.0, 0.0, length),
+            )
+            for color, ex, ey, ez in axes:
+                GL.glColor3f(*color[:3])
+                GL.glBegin(GL.GL_LINES)
+                GL.glVertex3f(0.0, 0.0, 0.0)
+                GL.glVertex3f(ex, ey, ez)
+                GL.glEnd()
+            GL.glLineWidth(1.0)
             GL.glEnable(GL.GL_CULL_FACE)
 
         # ── GL 辅助 ───────────────────────────────────────────────
