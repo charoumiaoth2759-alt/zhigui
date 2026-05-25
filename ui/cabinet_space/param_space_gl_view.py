@@ -80,7 +80,10 @@ if _HAS_PG:
         def mousePressEvent(self, event) -> None:  # noqa: ANN001
             h = self._param_host
             if h._root is not None:
-                if event.button() == Qt.MouseButton.LeftButton:
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and h.tool_mode in ADD_SIDE_PANEL_TOOL_MODES
+                ):
                     if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
                         if h._try_unlock_occ_at_screen(event):
                             self.update()

@@ -28,11 +28,11 @@ from .space_state import PlacementState
 
 # --- 基准色（线性 RGB 0~1，含 alpha）-----------------------------------------
 
-# ALLOWED：可放板件 → 透明纯青 (0, 255, 255, 153)
+# ALLOWED：可放板件 → 透明浅青 (135,240,240,153)
 _RGBA_ALLOWED_FACE: tuple[float, float, float, float] = (
-    0.0,
-    1.0,
-    1.0,
+    135 / 255.0,
+    240 / 255.0,
+    240 / 255.0,
     153 / 255.0,
 )
 _RGBA_ALLOWED_EDGE: tuple[float, float, float, float] = (0.0, 1.0, 1.0, 1.0)
@@ -69,11 +69,11 @@ _RGBA_OCCUPIED_EDGE: tuple[float, float, float, float] = (
 _RGBA_SPLIT_FACE: tuple[float, float, float, float] = (0.50, 0.78, 0.80, 0.32)
 _RGBA_SPLIT_EDGE: tuple[float, float, float, float] = (0.35, 0.70, 0.74, 0.88)
 
-# UNKNOWN + FREE：与 ALLOWED 同色透明纯青
+# UNKNOWN + FREE：与 ALLOWED 同色透明浅青
 _RGBA_DEFAULT_FACE: tuple[float, float, float, float] = (
-    0.0,
-    1.0,
-    1.0,
+    135 / 255.0,
+    240 / 255.0,
+    240 / 255.0,
     153 / 255.0,
 )
 _RGBA_DEFAULT_EDGE: tuple[float, float, float, float] = (0.0, 1.0, 1.0, 1.0)
