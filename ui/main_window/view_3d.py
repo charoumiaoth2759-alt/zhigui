@@ -66,6 +66,7 @@ from core.space.space_picker import HoverResult, SpacePicker
 from core.space.space_placement_sync import refresh_leaf_placement_ui_metadata
 from core.space.space_state import infer_space_state, read_ui_placement_for_space_display
 from core.space.space_visual_mapper import space_box_face_edge_rgba
+from core.space.hover_highlight_policy import should_highlight_space_node
 from ui.theme_constants import PANEL_COLOR, PANEL_EDGE_COLOR, panel_face_rgb
 
 from ui.cabinet_space.tool_modes import ADD_SIDE_PANEL_TOOL_MODES, ToolMode
@@ -1400,15 +1401,21 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 else None
             )
             hovered = False
+            hit_space_id: str | None = None
             mgr = resolve_cabinet_interaction_manager(self)
             if mgr is not None and mgr.preview.active:
                 hit = mgr.preview.hit
                 if hit is not None:
-                    hovered = str(hit.space.id) == str(getattr(space, "id", ""))
+                    hit_space_id = str(getattr(hit.space, "id", "") or "")
+                    hovered = should_highlight_space_node(
+                        str(getattr(space, "id", "") or ""),
+                        hit_space_id,
+                        self._cabinet_preview_active(),
+                    )
             fr, er = space_box_face_edge_rgba(
                 pick,
                 placement,
-                hovered=hovered or self._cabinet_preview_active(),
+                hovered=hovered,
                 cabinet_ops_user_allow=cab_allow,
             )
             x, y, z = float(space.x), float(space.y), float(space.z)
