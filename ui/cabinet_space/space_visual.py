@@ -251,8 +251,8 @@ class SpaceVisual:
     # 与 View3D 逻辑空间盒一致：QColor(135,240,240,153) 约 60% 透明；棱线 QColor(0,255,255)
     _FACE_RGBA = (135 / 255.0, 240 / 255.0, 240 / 255.0, 153 / 255.0)
     _EDGE_RGBA = (0.0, 1.0, 1.0, 1.0)
-    _OCCUPIED_FACE_RGBA = (35 / 255.0, 100 / 255.0, 230 / 255.0, 60 / 255.0)
-    _OCCUPIED_EDGE_RGBA = (35 / 255.0, 100 / 255.0, 230 / 255.0, 1.0)
+    _OCCUPIED_FACE_RGBA = (70 / 255.0, 140 / 255.0, 255 / 255.0, 60 / 255.0)
+    _OCCUPIED_EDGE_RGBA = (70 / 255.0, 140 / 255.0, 255 / 255.0, 1.0)
 
     def __init__(self, space: Space):
         self.space = space
