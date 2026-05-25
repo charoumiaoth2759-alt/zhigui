@@ -13,9 +13,9 @@
 
 状态与颜色（线性 RGBA 0~1；颜色不参与逻辑）::
 
-    ALLOWED   可放板件     透明青 (135,240,240)，α 153/255；棱线纯青 (0,255,255)
+    ALLOWED   可放板件     透明纯青 (0,255,255)，α 153/255；棱线纯青 (0,255,255)
     BLOCKED   不能放       柔和红：面片 (255,80,80)、α 90/255；棱线略深红
-    OCCUPIED  已放板件     科技蓝：面片 (70,140,255)、α 60/255；棱线蓝色
+    OCCUPIED  已放板件     科技蓝：面片 (35,100,230)、α 60/255；棱线蓝色
     HOVER     鼠标悬停     高亮透明青 (168,255,255)、α 200/255；棱线略深青
 
 ❌ 禁止根据颜色反推「能否放置」；业务层不得 ``if color == blue: allow()``。
@@ -28,11 +28,11 @@ from .space_state import PlacementState
 
 # --- 基准色（线性 RGB 0~1，含 alpha）-----------------------------------------
 
-# ALLOWED：可放板件 → 透明青 (135, 240, 240, 153)
+# ALLOWED：可放板件 → 透明纯青 (0, 255, 255, 153)
 _RGBA_ALLOWED_FACE: tuple[float, float, float, float] = (
-    135 / 255.0,
-    240 / 255.0,
-    240 / 255.0,
+    0.0,
+    1.0,
+    1.0,
     153 / 255.0,
 )
 _RGBA_ALLOWED_EDGE: tuple[float, float, float, float] = (0.0, 1.0, 1.0, 1.0)
@@ -51,11 +51,11 @@ _RGBA_BLOCKED_EDGE: tuple[float, float, float, float] = (
     1.0,
 )
 
-# OCCUPIED：已放板件 → 科技蓝 (70,140,255)，α 60/255；棱线蓝色
+# OCCUPIED：已放板件 → 科技蓝 (35,100,230)，α 60/255；棱线蓝色
 _RGBA_OCCUPIED_FACE: tuple[float, float, float, float] = (
-    70 / 255.0,
-    140 / 255.0,
-    255 / 255.0,
+    35 / 255.0,
+    100 / 255.0,
+    230 / 255.0,
     60 / 255.0,
 )
 _RGBA_OCCUPIED_EDGE: tuple[float, float, float, float] = (
@@ -69,11 +69,11 @@ _RGBA_OCCUPIED_EDGE: tuple[float, float, float, float] = (
 _RGBA_SPLIT_FACE: tuple[float, float, float, float] = (0.50, 0.78, 0.80, 0.32)
 _RGBA_SPLIT_EDGE: tuple[float, float, float, float] = (0.35, 0.70, 0.74, 0.88)
 
-# UNKNOWN + FREE：与 ALLOWED 同色透明青（历史默认）
+# UNKNOWN + FREE：与 ALLOWED 同色透明纯青
 _RGBA_DEFAULT_FACE: tuple[float, float, float, float] = (
-    135 / 255.0,
-    240 / 255.0,
-    240 / 255.0,
+    0.0,
+    1.0,
+    1.0,
     153 / 255.0,
 )
 _RGBA_DEFAULT_EDGE: tuple[float, float, float, float] = (0.0, 1.0, 1.0, 1.0)
@@ -95,9 +95,9 @@ def space_box_face_edge_rgba(
 
         1. 悬停 → 高亮透明青
         2. 结构 SPLIT 父节点 → 弱透明青灰
-        3. 结构 OCCUPIED 且未用户解锁 → 科技蓝 (70,140,255)，α 60/255，棱线蓝色
+        3. 结构 OCCUPIED 且未用户解锁 → 科技蓝 (35,100,230)，α 60/255，棱线蓝色
         4. 放置 BLOCKED → 柔和红 (255,80,80)，α 90/255
-        5. 放置 ALLOWED → 透明青 (135,240,240,153)
+        5. 放置 ALLOWED → 透明纯青 (0,255,255,153)
         6. 其它（含 UNKNOWN）→ 与 ALLOWED 相同透明青
 
     ``cabinet_ops_user_allow``：结构仍为 OCCUPIED 但用户已单击切换为允许编辑时，
