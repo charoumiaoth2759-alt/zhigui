@@ -64,6 +64,7 @@ from core.space.cabinet_ops_lock import (
 from core.space.placement_state import BLOCKED, INVALID, NEEDS_RELAYOUT, UNPLACED, METADATA_KEY
 from core.space.space_picker import HoverResult, SpacePicker
 from core.space.space_placement_sync import refresh_leaf_placement_ui_metadata
+from core.space.space_consistency_manager import SpaceConsistencyManager
 from core.space.space_state import infer_space_state, read_ui_placement_for_space_display
 from core.space.space_visual_mapper import space_box_face_edge_rgba
 from core.space.hover_highlight_policy import should_highlight_space_node
@@ -488,6 +489,13 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             return
         refresh_leaf_placement_ui_metadata(root, board_for_space=None)
 
+    def _sync_cabinet_space_occupancy(self) -> None:
+        """刷新 ``metadata.topology_occupancy``，保证 ``infer_space_state`` 读到最新占用语义。"""
+        root = self._cabinet_space
+        if root is None or not _HAS_OPENGL:
+            return
+        SpaceConsistencyManager().rebuild_occupancy(root)
+
     def _interaction_hover_move(
         self, sx: float, sy: float, *, mouse_pos: Any | None = None
     ) -> None:
@@ -632,6 +640,7 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 f"[View3D] draw panel ... {float(draw_p.thickness)} {float(draw_p.height)} {float(draw_p.width)}"
             )
         if self._cabinet_space is not None and _HAS_OPENGL:
+            self._sync_cabinet_space_occupancy()
             self._sync_cabinet_space_placement_ui_metadata()
         self.update()
 
