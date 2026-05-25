@@ -7,8 +7,8 @@ View3D —— 基于 QOpenGLWidget 的 3D 渲染视图，用于"画柜子"模式
     - OpenGL：画布内默认 **天顶浅蓝→下白** 竖直渐变；室外地面 **径向渐变**（浅蓝白→浅灰蓝）+
       **蓝灰透视网格**（线段两端颜色插值呈渐变）；雾为淡蓝白且较弱，避免画面发白、网格消失
     - 接收 2D 户型 Room：墙体在 XZ 平面，沿 Y 挤出默认 2800 mm，线框显示房间
-    - 鼠标左键拖拽：轨道旋转（Orbit）
-    - 鼠标右键拖拽 / 中键拖拽：平移（Pan）
+    - 鼠标左键拖拽：轨道旋转（Orbit）；悬停时由 ``PreviewManager`` 按 ``FaceType``+``InteractionMode`` 绘制 ghost；
+      左外侧面 **单击** / 快捷键 ``Z, Space`` 经 ``CabinetInteractionManager`` → ``UndoStack`` 提交加左侧板；    - 鼠标右键拖拽 / 中键拖拽：平移（Pan）
     - 滚轮：推进缩放（Dolly）
     - 坐标轴指示器（左下角 X/Y/Z 小箭头）
 
@@ -16,14 +16,20 @@ View3D —— 基于 QOpenGLWidget 的 3D 渲染视图，用于"画柜子"模式
     from ui.main_window.view_3d import View3D
 
     view = View3D(parent=self)
+
+调试：
+    添加左侧板后 ``print(panel)`` 输出 ``Panel`` repr；主 3D 在 ``set_display_panels`` 刷新时
+    对左侧板（或最后一块）打印一行 ``[View3D] draw panel`` + ``thickness height width``。
+    ``paintGL`` 内不再打印，避免刷屏。
 """
 
 import math
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import Qt, QPoint, QPointF, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QPainter, QPen, QBrush,
+    QColor, QCursor, QFont, QPainter, QPen, QBrush,
     QVector3D, QMatrix4x4, QOpenGLContext,
     QPalette, QPolygonF, QLinearGradient, QImage,
 )
@@ -32,6 +38,53 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 
 from space_engine.room import Room
 
+from core.debug_flags import DEBUG_VIEW3D
+from ui.cabinet_design_host import (
+    resolve_cabinet_design_view,
+    resolve_cabinet_interaction_manager,
+)
+from ui.interaction import CabinetInteractionSource
+from ui.interaction.hover_detector import VIEWPORT_MAIN_3D
+
+from core.constants.enums import PanelOrientation, PanelRole
+from core.panel.panel_face_mapper import try_get_face_by_panel_role
+from core.space.enums import FaceType
+from core.panel.panel_bounds import (
+    panel_world_aabb as _panel_world_aabb,
+    resolve_panel_orientation as _resolve_panel_orientation,
+)
+from core.space.enums import SpaceState as PickSpaceState
+from core.space.cabinet_ops_lock import (
+    cabinet_space_constraint_engine,
+    pick_closest_structural_occupied_leaf_for_ray,
+    read_cabinet_ops_user_allow,
+    toggle_cabinet_ops_user_allow,
+    unlock_closest_occ_leaf_if_locked,
+)
+from core.space.placement_state import BLOCKED, INVALID, NEEDS_RELAYOUT, UNPLACED, METADATA_KEY
+from core.space.space_picker import HoverResult, SpacePicker
+from core.space.space_placement_sync import refresh_leaf_placement_ui_metadata
+from core.space.space_state import infer_space_state, read_ui_placement_for_space_display
+from core.space.space_visual_mapper import space_box_face_edge_rgba
+from ui.theme_constants import PANEL_COLOR, PANEL_EDGE_COLOR, panel_face_rgb
+
+from ui.cabinet_space.tool_modes import ADD_SIDE_PANEL_TOOL_MODES, ToolMode
+from ui.qt_lifecycle import safe_set_font_size
+
+def _matrix4x4_mul_vector4(
+    m: QMatrix4x4, x: float, y: float, z: float, w: float
+) -> tuple[float, float, float, float]:
+    """``QMatrix4x4`` × 齐次列向量。PySide6 对 ``inv * QVector4D`` 绑定不完整，用列主序显式相乘。"""
+    d = m.data()
+    if len(d) < 16:
+        return (0.0, 0.0, 0.0, 0.0)
+    rx = d[0] * x + d[4] * y + d[8] * z + d[12] * w
+    ry = d[1] * x + d[5] * y + d[9] * z + d[13] * w
+    rz = d[2] * x + d[6] * y + d[10] * z + d[14] * w
+    rw = d[3] * x + d[7] * y + d[11] * z + d[15] * w
+    return (rx, ry, rz, rw)
+
+
 # ── 尝试导入 OpenGL；若环境不支持则降级为 QPainter 软渲染占位 ────────
 try:
     from OpenGL import GL
@@ -39,15 +92,92 @@ try:
 except ImportError:
     _HAS_OPENGL = False
 
+from core.debug_flags import DEBUG_VIEW3D
+
 
 def _diban_image_path() -> Path:
     """与主程序同级的 icons/diban.jpg（scene 单位 mm，2D/3D 地板共用）。"""
     return Path(__file__).resolve().parents[2] / "icons" / "diban.jpg"
 
 
+def _panel_box_vertices_xyz(
+    x0: float, x1: float, y0: float, y1: float, z0: float, z1: float
+) -> list[tuple[float, float, float]]:
+    """
+    轴对齐盒 8 顶点（仅由 AABB 最小/最大角点导出），顺序固定::
+
+        z=min 面: (x0,y0,z0), (x1,y0,z0), (x1,y1,z0), (x0,y1,z0)
+        z=max 面: (x0,y0,z1), (x1,y0,z1), (x1,y1,z1), (x0,y1,z1)
+
+    其中 ``x0<=x1, y0<=y1, z0<=z1``（若入参颠倒则先规范化），供 ``GL_TRIANGLES``
+    与 ``_PANEL_BOX_TRIANGLE_INDICES`` 使用；**不使用 GL_QUADS**。
+    """
+    xa, xb = (x0, x1) if x0 <= x1 else (x1, x0)
+    ya, yb = (y0, y1) if y0 <= y1 else (y1, y0)
+    za, zb = (z0, z1) if z0 <= z1 else (z1, z0)
+    return [
+        (xa, ya, za),
+        (xb, ya, za),
+        (xb, yb, za),
+        (xa, yb, za),
+        (xa, ya, zb),
+        (xb, ya, zb),
+        (xb, yb, zb),
+        (xa, yb, zb),
+    ]
+
+
+# 与 ``_panel_box_vertices_xyz`` 的 0..7 顶点顺序一致：12 三角 = 6 面 × 2
+_PANEL_BOX_TRIANGLE_INDICES: tuple[tuple[int, int, int], ...] = (
+    (0, 2, 1),
+    (0, 3, 2),
+    (4, 5, 6),
+    (4, 6, 7),
+    (0, 1, 5),
+    (0, 5, 4),
+    (2, 3, 7),
+    (2, 7, 6),
+    (0, 4, 7),
+    (0, 7, 3),
+    (1, 2, 6),
+    (1, 6, 5),
+)
+
+# 12 棱（线框）
+_PANEL_BOX_EDGE_INDICES: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0),
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4),
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7),
+)
+
+
+def _panel_role_value_str(panel) -> str:
+    """板件 role 的稳定字符串（避免本模块依赖 core 枚举类型）。"""
+    r = getattr(panel, "role", None)
+    if r is None:
+        return ""
+    v = getattr(r, "value", None)
+    if isinstance(v, str):
+        return v
+    return str(r)
+
+
 # ================================================================ View3D
 class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
     """3D 柜体设计视图。
+
+    本项目中 **唯一** 在 OpenGL 可用时继承 ``QOpenGLWidget`` 的 3D 视图类（无独立
+    ``Cabinet3DView`` / ``GLView`` 别名）。鼠标与键盘交互 **必须** 实现在本类内，
+    勿放到 ``MainWindow``。
 
     运行时自动检测 OpenGL 可用性：
         - 可用：走 QOpenGLWidget 路径，用 GL 绘制网格与柜体线框。
@@ -85,8 +215,13 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
     # 左上角「空间尺寸」提示：与左缘距离，避免与顶部 2D/3D 悬浮导航条重叠
     _CABINET_SPACE_HINT_X = 228
 
+    # 线框 / 板件黑棱等边线线宽（≤2，避免部分 GPU 异常）
+    _EDGE_LINE_WIDTH = 1.2
+
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        # 使用 ``main.py`` 中 ``QSurfaceFormat.setDefaultFormat`` 的 MSAA 等设置，此处不 ``setFormat`` 覆盖
 
         # ── 2D 同步：户型墙体挤出 ───────────────────────────────────
         self._room: Room | None = None
@@ -98,13 +233,34 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         self._distance  = self._DEFAULT_DISTANCE
         self._target    = QVector3D(self._DEFAULT_TARGET)
 
-        # ── 鼠标拖拽状态 ──────────────────────────────────────────
+        # ── 鼠标：点击 vs 旋转（阈值 8~12px，勿低于 6）────────────────
         self._last_pos: QPoint | None = None
+        self.mouse_press_pos: QPoint | None = None
+        self.pending_click = False
+        self.is_rotating = False
+        self.rotate_threshold = 8
+        self._pressed_hover_face = None
+        self._pressed_hover_space_id: str | None = None
         self._drag_mode: str = "none"   # "orbit" | "pan"
+        self._click_command_in_flight: bool = False  # 防双击/连点重复提交 ADD_PANEL
+        self._suppress_incremental_update: bool = False  # solver 期间抑制中间 update
         self._floor_tex_id: int = 0     # OpenGL 地板纹理（diban.jpg），initializeGL 中加载
 
         # 柜体「逻辑空间」根盒（与画柜子主 3D 同一套背景/地面/网格，仅多画此盒）
         self._cabinet_space = None
+        # 空间拾取：约束引擎（无 Qt 依赖，可复用）
+        self._space_pick_engine = cabinet_space_constraint_engine()
+        # 用户户型环境：室外地面+透视网格、房间内墙与地面；柜体设计模式下可关闭
+        self._show_user_floorplan_environment = True
+        # 由 `SOLVE_COMPLETED` 订阅回调写入的板件列表，供 OpenGL 叠加绘制
+        self._display_panels: list | None = None
+        # 与 ``SolveResult.panel_groups`` 同步，供日志与后续扩展（与展平 ``_display_panels`` 一致）
+        self._display_panel_groups: list | None = None
+
+        self.current_tool: ToolMode = ToolMode.SELECT
+        # ``bind`` 注入 ``controller`` / ``dispatcher``（历史字段；加板不经 Dispatcher）
+        self.controller: Any = None
+        self.dispatcher: Any = None
 
         if not _HAS_OPENGL:
             # 软渲染模式：接受 QPainter 绘制
@@ -113,8 +269,504 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             pal.setColor(QPalette.ColorRole.Window, self.BG_COLOR)
             self.setPalette(pal)
 
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # QOpenGLWidget / QWidget：鼠标跟踪与强焦点须在本控件上设置，否则无键 move 与快捷键无法送达
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus()
+
+        # 与 ``from PyQt6.QtGui import QShortcut, QKeySequence`` 相同 API；本仓库绑定 PySide6。
+        # 注意：``QKeySequence("Z+Space")`` 在 Qt Portable 下解析为空，快捷键永远不会触发；
+        # 使用 ``Z, Space`` 表示「先按 Z、再按 Space」（与常见 Z+Space 操作习惯一致）。
+        from PySide6.QtGui import QShortcut, QKeySequence
+
+        _ks = QKeySequence.fromString(
+            "Z, Space", QKeySequence.SequenceFormat.PortableText
+        )
+        self.shortcut_left_panel = QShortcut(_ks, self)
+        self.shortcut_left_panel.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self.shortcut_left_panel.setEnabled(False)
+        self.shortcut_left_panel.activated.connect(
+            self._shortcut_submit_add_left_panel
+        )
+
+    def showEvent(self, event):
+        """显示后再次确认鼠标跟踪与焦点策略（栈切换后可能被重置）。"""
+        super().showEvent(event)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus()
+
+    def set_tool_mode(self, mode: ToolMode) -> None:
+        """切换柜体设计工具状态（仅状态位，不派发命令）。"""
+        if mode == ToolMode.SELECT:
+            mgr = resolve_cabinet_interaction_manager(self)
+            if mgr is not None:
+                mgr.clear_preview_on_select_tool()
+        self.current_tool = mode
+
+    def _orbit_eye_qvector(self) -> QVector3D:
+        """与 ``paintGL`` / ``_eye_pos`` 一致的轨道眼点（mm）。"""
+        az = math.radians(self._azimuth)
+        el = math.radians(self._elevation)
+        d = self._distance
+        x = d * math.cos(el) * math.sin(az)
+        y = d * math.sin(el)
+        z = d * math.cos(el) * math.cos(az)
+        return QVector3D(
+            self._target.x() + x,
+            self._target.y() + y,
+            self._target.z() + z,
+        )
+
+    def _cabinet_screen_ray_mm(
+        self, sx: float, sy: float
+    ) -> tuple[QVector3D, QVector3D] | None:
+        """与 ``paintGL`` 一致的透视 + lookAt，得到世界空间射线（mm）。"""
+        if not _HAS_OPENGL:
+            return None
+        w, h = self.width(), self.height()
+        if w < 1 or h < 1:
+            return None
+        aspect = w / max(h, 1)
+        proj = QMatrix4x4()
+        proj.perspective(58.0, aspect, 3.0, 800_000.0)
+        eye = self._orbit_eye_qvector()
+        view = QMatrix4x4()
+        view.lookAt(eye, self._target, QVector3D(0, 1, 0))
+        mvp = proj * view
+        inv, ok = mvp.inverted()
+        if not ok:
+            return None
+        nx = 2.0 * float(sx) / float(w) - 1.0
+        ny = 1.0 - 2.0 * float(sy) / float(h)
+
+        def _un(zc: float) -> QVector3D | None:
+            rx, ry, rz, rw = _matrix4x4_mul_vector4(inv, nx, ny, zc, 1.0)
+            if abs(rw) < 1e-9:
+                return None
+            return QVector3D(rx / rw, ry / rw, rz / rw)
+
+        pn = _un(-1.0)
+        pf = _un(1.0)
+        if pn is None or pf is None:
+            return None
+        rd = pf - pn
+        ln = rd.length()
+        if ln < 1e-9:
+            return None
+        return pn, QVector3D(rd.x() / ln, rd.y() / ln, rd.z() / ln)
+
+    def _cabinet_world_to_screen_px(
+        self, wx: float, wy: float, wz: float
+    ) -> tuple[float, float] | None:
+        """世界坐标 (mm) → 主 3D 视图像素，与 ``_cabinet_screen_ray_mm`` 同一套 MVP。"""
+        if not _HAS_OPENGL:
+            return None
+        w, h = self.width(), self.height()
+        if w < 1 or h < 1:
+            return None
+        aspect = w / max(h, 1)
+        proj = QMatrix4x4()
+        proj.perspective(58.0, aspect, 3.0, 800_000.0)
+        eye = self._orbit_eye_qvector()
+        view = QMatrix4x4()
+        view.lookAt(eye, self._target, QVector3D(0, 1, 0))
+        mvp = proj * view
+        rx, ry, rz, rw = _matrix4x4_mul_vector4(
+            mvp, float(wx), float(wy), float(wz), 1.0
+        )
+        if abs(rw) < 1e-9:
+            return None
+        ndc_x = rx / rw
+        ndc_y = ry / rw
+        if ndc_x < -1.05 or ndc_x > 1.05 or ndc_y < -1.05 or ndc_y > 1.05:
+            return None
+        sx = (ndc_x + 1.0) * 0.5 * float(w)
+        sy = (1.0 - ndc_y) * 0.5 * float(h)
+        return (sx, sy)
+
+    def _try_unlock_cabinet_occ_leaf_at_screen(self, sx: float, sy: float) -> bool:
+        """锁定态 OCCUPIED 叶：普通单击盒体 AABB 解锁为 ALLOWED 配色。"""
+        root = self._cabinet_space
+        if root is None:
+            return False
+        ray = self._cabinet_screen_ray_mm(sx, sy)
+        if ray is None:
+            return False
+        origin, direction = ray
+        leaf = unlock_closest_occ_leaf_if_locked(
+            root,
+            (origin.x(), origin.y(), origin.z()),
+            (direction.x(), direction.y(), direction.z()),
+        )
+        return leaf is not None
+
+    def _try_toggle_cabinet_occ_leaf_at_screen(self, sx: float, sy: float) -> bool:
+        """Ctrl+单击：命中 OCCUPIED 叶 AABB 时在允许/锁定间切换。"""
+        root = self._cabinet_space
+        if root is None:
+            return False
+        ray = self._cabinet_screen_ray_mm(sx, sy)
+        if ray is None:
+            return False
+        origin, direction = ray
+        leaf = pick_closest_structural_occupied_leaf_for_ray(
+            root,
+            (origin.x(), origin.y(), origin.z()),
+            (direction.x(), direction.y(), direction.z()),
+        )
+        if leaf is None:
+            return False
+        toggle_cabinet_ops_user_allow(leaf)
+        return True
+
+    def cabinet_space_pick_at_world_point(self, wx: float, wy: float, wz: float) -> bool:
+        """
+        世界坐标点是否命中可放置叶空间（轴对齐包围盒 + 拾取管线）。
+
+        供 UI 在具备世界点（如反投影）时使用；不在此处写状态/遍历细节。
+        """
+        root = self._cabinet_space
+        if root is None:
+            return False
+        picked = SpacePicker.pick_leaf_for_world_point(
+            root,
+            float(wx),
+            float(wy),
+            float(wz),
+            constraint_engine=self._space_pick_engine,
+            board_context=None,
+        )
+        return picked is not None
+
+    def _submit_main_3d_add_left_panel_interaction(
+        self,
+        *,
+        payload: dict | None,
+        source: CabinetInteractionSource,
+    ) -> None:
+        """主 3D：宿主 ``submit_add_left_panel_interaction``（统一编辑链路）。"""
+        cdv = resolve_cabinet_design_view(self)
+        if cdv is None:
+            return
+        pl: dict = payload if payload is not None else {}
+        try:
+            fn = getattr(cdv, "submit_add_left_panel_interaction", None)
+            if not callable(fn):
+                return
+            fn(pl, source=source)
+        except Exception:
+            pass
+
+    def _shortcut_submit_add_left_panel(self) -> None:
+        """QShortcut「Z, Space」：经 ``CabinetInteractionManager`` 提交加左侧板。"""
+        if self._cabinet_space is None:
+            return
+        self.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._submit_main_3d_add_left_panel_interaction(
+            payload={},
+            source=CabinetInteractionSource.MAIN_3D_SHORTCUT,
+        )
+
+    def _sync_cabinet_space_placement_ui_metadata(self) -> None:
+        """由 ``PreviewManager`` 规格刷新叶 ``Space.metadata``（非硬编码左板）。"""
+        root = self._cabinet_space
+        if root is None or not _HAS_OPENGL:
+            return
+        mgr = resolve_cabinet_interaction_manager(self)
+        if mgr is not None:
+            mgr.preview.sync_placement_metadata(
+                root,
+                engine=self._space_pick_engine,
+                tool_mode=self.current_tool,
+            )
+            return
+        refresh_leaf_placement_ui_metadata(root, board_for_space=None)
+
+    def _interaction_hover_move(
+        self, sx: float, sy: float, *, mouse_pos: Any | None = None
+    ) -> None:
+        """Viewport → ``InteractionManager`` → ``PreviewManager``（本控件不直接拾取）。"""
+        if not _HAS_OPENGL or self._cabinet_space is None:
+            return
+        mgr = resolve_cabinet_interaction_manager(self)
+        if mgr is None:
+            return
+        tick = mgr.handle_viewport_hover_move(
+            VIEWPORT_MAIN_3D,
+            sx,
+            sy,
+            viewport=self,
+            tool_mode=self.current_tool,
+            drag_mode=self._hover_drag_mode(),
+            mouse_pos=mouse_pos,
+        )
+        if tick.needs_repaint:
+            self.update()
+
+    @property
+    def current_hover_face(self):
+        mgr = resolve_cabinet_interaction_manager(self)
+        if mgr is None:
+            return None
+        hit = mgr.current_hover
+        if hit is not None:
+            return hit.face
+        return mgr.hover_state.hovered_face_type or None
+
+    @property
+    def current_hover_space_id(self) -> str | None:
+        mgr = resolve_cabinet_interaction_manager(self)
+        if mgr is None:
+            return None
+        hit = mgr.current_hover
+        if hit is not None:
+            sid = str(getattr(getattr(hit, "space", None), "id", "") or "").strip()
+            return sid or None
+        sid = getattr(mgr.hover_state, "hovered_space_id", None)
+        if sid:
+            s = str(sid).strip()
+            return s if s else None
+        return None
+
+    def _cabinet_preview_active(self) -> bool:
+        mgr = resolve_cabinet_interaction_manager(self)
+        return mgr is not None and mgr.preview.active
+
+    def _hover_drag_mode(self) -> str:
+        """悬停拾取用：旋转/平移进行时不更新 hover。"""
+        if self.is_rotating:
+            return "orbit"
+        if self._drag_mode == "pan":
+            return "pan"
+        return "none"
+
+    def _move_point(self, event) -> QPoint:
+        if hasattr(event, "position"):
+            return event.position().toPoint()
+        return event.pos()
+
+    def _update_hover(self, pos: QPoint) -> None:
+        self._interaction_hover_move(float(pos.x()), float(pos.y()), mouse_pos=pos)
+
+    def _rotate_camera(self, curr: QPoint) -> None:
+        if self._last_pos is None:
+            self._last_pos = curr
+            return
+        dx = curr.x() - self._last_pos.x()
+        dy = curr.y() - self._last_pos.y()
+        self._last_pos = curr
+        self._azimuth -= dx * 0.5
+        self._elevation = max(-89.0, min(89.0, self._elevation + dy * 0.5))
+        self.sig_camera_changed.emit(self._azimuth, self._elevation)
+
+    def _pan_camera(self, curr: QPoint) -> None:
+        if self._last_pos is None:
+            self._last_pos = curr
+            return
+        dx = curr.x() - self._last_pos.x()
+        dy = curr.y() - self._last_pos.y()
+        self._last_pos = curr
+        az = math.radians(self._azimuth)
+        speed = self._distance * 0.0015
+        right = QVector3D(math.cos(az), 0, -math.sin(az))
+        up = QVector3D(0, 1, 0)
+        self._target -= right * (dx * speed)
+        self._target += up * (dy * speed)
+
+    def _confirm_pressed_hover_click(self, px: float, py: float) -> bool:
+        """释放时用按下瞬间锁定的 space/face 确认点击（禁止读 current_hover_*）。"""
+        face = self._pressed_hover_face
+        space_id = self._pressed_hover_space_id
+        if not space_id or face is None or not isinstance(face, FaceType):
+            return False
+        mgr = resolve_cabinet_interaction_manager(self)
+        if mgr is None:
+            return False
+        mgr.current_hover_result = HoverResult(
+            space_id=str(space_id).strip(),
+            face_type=face,
+        )
+        return mgr.confirm_viewport_hover_click(
+            VIEWPORT_MAIN_3D,
+            px,
+            py,
+            viewport=self,
+            source=CabinetInteractionSource.MAIN_3D_HOVER_CLICK,
+            tool_mode=self.current_tool,
+        )
+
+    def rebuild_all_display_panels(self, panels: list | None) -> None:
+        """
+        全量重建板件绘制列表。
+
+        仅允许：柜体尺寸变化、根布局重算、``SPACE_CHANGED`` 全量求解链调用。
+        """
+        plist: list = []
+        seen: set[str] = set()
+        for p in list(panels or []):
+            pid = str(getattr(p, "id", "") or "")
+            if pid:
+                if pid in seen:
+                    continue
+                seen.add(pid)
+            plist.append(p)
+        self._display_panels = plist if plist else None
+        print("[View3D] rebuild panels =", len(plist))
+        if plist:
+            draw_p = None
+            for p in plist:
+                role = getattr(p, "role", None)
+                face = try_get_face_by_panel_role(role) if role is not None else None
+                if face is FaceType.LEFT:
+                    draw_p = p
+                    break
+            if draw_p is None:
+                draw_p = plist[-1]
+            print(
+                f"[View3D] draw panel ... {float(draw_p.thickness)} {float(draw_p.height)} {float(draw_p.width)}"
+            )
+        if self._cabinet_space is not None and _HAS_OPENGL:
+            self._sync_cabinet_space_placement_ui_metadata()
+        self.update()
+
+    def set_display_panels(
+        self, panels: list | None, *, full_rebuild: bool = False
+    ) -> None:
+        """兼容入口；仅 ``full_rebuild=True`` 时全量重建，否则无操作。"""
+        if full_rebuild:
+            self.rebuild_all_display_panels(panels)
+
+    @property
+    def panel_visuals(self) -> list:
+        """与真实板件 1:1 的绘制列表（``_display_panels``）。"""
+        return list(self._display_panels or [])
+
+    def _assert_panel_visual_invariant(self) -> None:
+        panels = self._display_panels or []
+        ids = [str(getattr(p, "id", "") or "") for p in panels]
+        if len(ids) != len(set(i for i in ids if i)):
+            raise RuntimeError(
+                f"[View3D] duplicate panel visual ids: {ids}"
+            )
+
+    def add_panel_visual(
+        self, panel: object, *, target_space: object | None = None
+    ) -> bool:
+        """增量追加单块板件；已存在同 ``id`` 时禁止重复 append。"""
+        pid = str(getattr(panel, "id", "") or "")
+        if not pid:
+            return False
+        known = {
+            str(getattr(p, "id", "") or "") for p in (self._display_panels or [])
+        }
+        if pid in known:
+            return False
+        self.append_display_panels([panel], target_space=target_space)
+        self._assert_panel_visual_invariant()
+        return True
+
+    def append_display_panels(
+        self, panels: list, *, target_space: object | None = None
+    ) -> None:
+        """增量追加板件 GL（``AddBoardCommand``）；已存在同 ``id`` 时跳过。"""
+        from ui.interaction.interaction_log import log_view3d_add_panel_visual
+
+        incoming = list(panels or [])
+        if not incoming:
+            return
+        existing = list(self._display_panels or [])
+        known = {str(getattr(p, "id", "") or "") for p in existing}
+        added: list = []
+        for p in incoming:
+            pid = str(getattr(p, "id", "") or "")
+            if not pid or pid in known:
+                continue
+            existing.append(p)
+            known.add(pid)
+            added.append(p)
+        if not added:
+            return
+        self._display_panels = existing
+        log_view3d_add_panel_visual()
+        if self._cabinet_space is not None and _HAS_OPENGL:
+            if not self._suppress_incremental_update:
+                if target_space is not None:
+                    self.refresh_cabinet_spaces_incremental(target_space)
+                else:
+                    self._sync_cabinet_space_placement_ui_metadata()
+                    self.update()
+
+    def refresh_cabinet_spaces_incremental(self, anchor_space: object) -> None:
+        """
+        加板后仅刷新 ``anchor_space`` 及其子空间盒颜色（不重绑根、不 refit 相机）。
+        """
+        if self._cabinet_space is None or not _HAS_OPENGL:
+            return
+        self._sync_cabinet_space_placement_ui_metadata()
+        self.update()
+
+    def remove_panel_visual(self, panel_id: str) -> bool:
+        """增量移除单块板件可视化。"""
+        drop = str(panel_id or "")
+        if not drop:
+            return False
+        before = len(self._display_panels or [])
+        self.remove_display_panels_by_ids([drop])
+        after = len(self._display_panels or [])
+        if before != after:
+            self._assert_panel_visual_invariant()
+            return True
+        return False
+
+    def remove_display_panels_by_ids(self, panel_ids: list[str]) -> None:
+        from ui.interaction.interaction_log import log_view3d_remove_panel_visual
+
+        drop = {str(x) for x in (panel_ids or []) if x}
+        if not drop or not self._display_panels:
+            return
+        remaining = [
+            p
+            for p in self._display_panels
+            if str(getattr(p, "id", "") or "") not in drop
+        ]
+        if len(remaining) == len(self._display_panels):
+            return
+        self._display_panels = remaining if remaining else None
+        log_view3d_remove_panel_visual()
+        if self._cabinet_space is not None and _HAS_OPENGL:
+            self._sync_cabinet_space_placement_ui_metadata()
+        self.update()
+
+    def rebuild_panels(self, panels: list | None) -> None:
+        """
+        全量同步板件绘制列表（``len(panel_visuals) == len(real_panels)``）。
+
+        与 ``rebuild_all_display_panels`` 相同语义；``panel_groups`` 请展平为 ``Panel`` 列表传入。
+        """
+        flat: list = []
+        for item in list(panels or []):
+            if hasattr(item, "panels"):
+                flat.extend(getattr(item, "panels", None) or [])
+            else:
+                flat.append(item)
+        self.rebuild_all_display_panels(flat)
+        self._assert_panel_visual_invariant()
+
+    def set_display_panel_groups(self, panel_groups: list | None) -> None:
+        """与 ``SolveResult.panel_groups`` 同步（仅缓存；板件绘制以 ``rebuild_all_display_panels`` 为准）。"""
+        self.rebuild_panels(panel_groups)
+
+    def set_show_user_floorplan_environment(self, visible: bool) -> None:
+        """是否绘制用户户型环境（室外地面+透视网格、房间墙与地面）。
+
+        柜体设计模式下传 ``False``：仅保留渐变天幕与柜体相关绘制（逻辑空间盒、板件、HUD），
+        不绘制用户创建的墙/房间/地面及视图透视网格。
+        """
+        self._show_user_floorplan_environment = bool(visible)
+        self.update()
 
     def set_room(self, room: Room | None, extrude_height: float | None = None) -> None:
         """绑定画户型中的房间数据；进入 3D 时调用以刷新挤出线框。
@@ -154,12 +806,42 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         self._target = QVector3D(cx, cy, cz)
         self._distance = max(span * 1.35, 1500.0)
 
-    def set_cabinet_space(self, space) -> None:
-        """绑定柜体逻辑空间根盒（Space 或 None）；与主界面「画柜子」3D 共用本视图背景。"""
+    def set_cabinet_space(self, space, *, refit_camera: bool = True) -> None:
+        """绑定柜体逻辑空间根盒（Space 或 None）；与主界面「画柜子」3D 共用本视图背景。
+
+        Args:
+            space: 根 ``Space`` 或 ``None``（退出柜体盒显示）。
+            refit_camera: 为 ``False`` 时仅更新逻辑盒/拾取数据（如 ``SOLVE_COMPLETED`` 增量刷新），
+                **不改变**方位角、仰角、距离与目标点（用户轨道视角保持不变）。
+        """
         self._cabinet_space = space
+        sc = getattr(self, "shortcut_left_panel", None)
+        if sc is not None:
+            if space is not None:
+                sc.setEnabled(True)
+                # 焦点常在属性/资源侧栏：应用级上下文才能在未点进 3D 时响应「Z, Space」
+                sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            else:
+                sc.setEnabled(False)
+                sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+                self._last_pos = None
+                mgr = resolve_cabinet_interaction_manager(self)
+                if mgr is not None:
+                    mgr.clear_preview()
         if space is not None:
-            self._fit_camera_to_cabinet_space()
-        self.sig_camera_changed.emit(self._azimuth, self._elevation)
+            self._sync_cabinet_space_placement_ui_metadata()
+            if refit_camera:
+                self._fit_camera_to_cabinet_space()
+        if refit_camera:
+            self.sig_camera_changed.emit(self._azimuth, self._elevation)
+        self.update()
+
+    def set_scene(self, space, *, refit_camera: bool = True) -> None:
+        """与 ``set_cabinet_space`` 同义；供 ``CABINET_CREATED`` 等事件语义化调用。"""
+        self.set_cabinet_space(space, refit_camera=refit_camera)
+
+    def refresh(self) -> None:
+        """柜体命令后轻量重绘（供 ``MainWindow.refresh_cabinet_view`` 调用）。"""
         self.update()
 
     def _fit_camera_to_cabinet_space(self) -> None:
@@ -181,6 +863,8 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         def initializeGL(self):
             GL.glClearColor(0.86, 0.93, 0.99, 1.0)
             GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glEnable(GL.GL_MULTISAMPLE)
+            GL.glEnable(GL.GL_LINE_SMOOTH)
             GL.glShadeModel(GL.GL_SMOOTH)
             GL.glEnable(GL.GL_BLEND)
             GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
@@ -247,6 +931,11 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             # ── 先用 QPainter 画渐变背景（天空 + 室外地面网格）──────
             self._draw_background_painter()
 
+            # QPainter 可能改变 GL 状态：每帧恢复深度测试与线平滑（禁止关闭深度测试，避免棱线穿透）
+            GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glEnable(GL.GL_MULTISAMPLE)
+            GL.glEnable(GL.GL_LINE_SMOOTH)
+
             # ── 投影矩阵 ──────────────────────────────────────────
             GL.glMatrixMode(GL.GL_PROJECTION)
             GL.glLoadIdentity()
@@ -271,14 +960,20 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             ex, ey, ez = eye
             self._gl_lookat(ex, ey, ez, tx, ty, tz, 0, 1, 0)
 
-            # ── 室外：渐变地面 + 白色透视网格 ───────────────────────
-            self._draw_outdoor_ground_and_grid_gl()
+            # ── 室外：渐变地面 + 透视网格（用户「视图网格」）────────────────
+            if self._show_user_floorplan_environment:
+                self._draw_outdoor_ground_and_grid_gl()
 
-            # ── 房间实体（背面剔除自动隐藏前墙）─────────────────
-            self._draw_room_solid_gl()
+            # ── 房间实体：用户墙与地面（背面剔除自动隐藏前墙）─────────────
+            if self._show_user_floorplan_environment:
+                self._draw_room_solid_gl()
 
-            # ── 柜体逻辑空间根盒（浅青填充 + 纯青棱线）──
+            # ── 柜体逻辑空间根盒（浅青半透明填充 + 纯青棱线）──
             self._draw_cabinet_space_gl()
+            self._draw_hover_preview_ghost_gl()
+
+            # ── 板件：实体盒 + 黑棱（数据由 SOLVE_COMPLETED 链写入）──
+            self._draw_generated_panels_gl()
 
             # ── 左下角坐标轴 HUD ──────────────────────────────────
             self._draw_overlay_painter()
@@ -639,12 +1334,38 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                     GL.glEnd()
 
         def _draw_cabinet_space_gl(self) -> None:
-            """柜体根逻辑空间：浅青填充（QColor(135,240,240,153) 约 60% 透明）+ 纯青棱线 1px。"""
-            cs = getattr(self, "_cabinet_space", None)
-            if cs is None:
+            """柜体逻辑空间树：每个 ``Space`` 一盒（状态色由 mapper 决定）。"""
+            root = getattr(self, "_cabinet_space", None)
+            if root is None:
                 return
-            x, y, z = float(cs.x), float(cs.y), float(cs.z)
-            w, h, d = float(cs.width), float(cs.height), float(cs.depth)
+            from core.space.tree import walk_dfs
+
+            for node in walk_dfs(root):
+                self._draw_cabinet_space_node_gl(node)
+
+        def _draw_cabinet_space_node_gl(self, space: object) -> None:
+            """绘制单个逻辑空间盒。"""
+            pick = infer_space_state(space)
+            placement = read_ui_placement_for_space_display(space)
+            cab_allow = (
+                read_cabinet_ops_user_allow(space)
+                if pick is PickSpaceState.OCCUPIED
+                else None
+            )
+            hovered = False
+            mgr = resolve_cabinet_interaction_manager(self)
+            if mgr is not None and mgr.preview.active:
+                hit = mgr.preview.hit
+                if hit is not None:
+                    hovered = str(hit.space.id) == str(getattr(space, "id", ""))
+            fr, er = space_box_face_edge_rgba(
+                pick,
+                placement,
+                hovered=hovered or self._cabinet_preview_active(),
+                cabinet_ops_user_allow=cab_allow,
+            )
+            x, y, z = float(space.x), float(space.y), float(space.z)
+            w, h, d = float(space.width), float(space.height), float(space.depth)
             corners = [
                 (x, y, z),
                 (x + w, y, z),
@@ -655,7 +1376,7 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 (x + w, y + h, z + d),
                 (x, y + h, z + d),
             ]
-            tris = [
+            tris = (
                 (0, 2, 1),
                 (0, 3, 2),
                 (4, 5, 6),
@@ -668,13 +1389,12 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 (0, 7, 3),
                 (1, 2, 6),
                 (1, 6, 5),
-            ]
+            )
             GL.glDisable(GL.GL_CULL_FACE)
             GL.glEnable(GL.GL_POLYGON_OFFSET_FILL)
             GL.glPolygonOffset(1.0, 1.0)
             GL.glDepthMask(GL.GL_FALSE)
-            # 填充：浅青 + alpha 153（约 60% 透明，与 50%→128 同一换算：百分比×255）
-            GL.glColor4f(135 / 255.0, 240 / 255.0, 240 / 255.0, 153 / 255.0)
+            GL.glColor4f(fr[0], fr[1], fr[2], fr[3])
             GL.glBegin(GL.GL_TRIANGLES)
             for a, b, c in tris:
                 for i in (a, b, c):
@@ -683,9 +1403,9 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             GL.glDepthMask(GL.GL_TRUE)
             GL.glDisable(GL.GL_POLYGON_OFFSET_FILL)
 
-            # 边框：纯青 QColor(0,255,255)，线宽 1px
-            GL.glLineWidth(1.0)
-            GL.glColor3f(0.0, 1.0, 1.0)
+            GL.glDepthMask(GL.GL_FALSE)
+            GL.glLineWidth(self._EDGE_LINE_WIDTH)
+            GL.glColor4f(er[0], er[1], er[2], er[3])
             GL.glBegin(GL.GL_LINES)
             for a, b in (
                 (0, 1),
@@ -704,7 +1424,79 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
                 GL.glVertex3f(*corners[a])
                 GL.glVertex3f(*corners[b])
             GL.glEnd()
+            GL.glDepthMask(GL.GL_TRUE)
             GL.glLineWidth(1.0)
+            GL.glEnable(GL.GL_CULL_FACE)
+
+        def _draw_hover_preview_ghost_gl(self) -> None:
+            """Preview System 统一绘制（``preview_renderer.draw_viewport_preview_ghost``）。"""
+            if self.current_tool not in (
+                ToolMode.SELECT,
+                *ADD_SIDE_PANEL_TOOL_MODES,
+            ):
+                return
+            from ui.interaction.preview_renderer import draw_viewport_preview_ghost
+
+            draw_viewport_preview_ghost(self, GL)
+
+        def _gl_draw_panel(self, panel) -> None:
+            """单块板件：轴对齐盒实体 + 黑棱（``paintGL`` 中按列表逐块调用）。"""
+            try:
+                if _resolve_panel_orientation(panel) == PanelOrientation.VERTICAL_X:
+                    px = float(getattr(panel, "x", 0.0))
+                    py = float(getattr(panel, "y", 0.0))
+                    pz = float(getattr(panel, "z", 0.0))
+                    sx = float(getattr(panel, "thickness", 0.0))
+                    sy = float(getattr(panel, "height", 0.0))
+                    sz = float(getattr(panel, "width", 0.0))
+                    x0, x1 = px, px + sx
+                    y0, y1 = py, py + sy
+                    z0, z1 = pz, pz + sz
+                else:
+                    x0, x1, y0, y1, z0, z1 = _panel_world_aabb(panel)
+            except Exception:
+                return
+            corners = _panel_box_vertices_xyz(x0, x1, y0, y1, z0, z1)
+            md = getattr(panel, "metadata", None)
+            st = md.get(METADATA_KEY) if isinstance(md, dict) else None
+            fr, fg, fb, fa = panel_face_rgb(
+                unplaced=st == UNPLACED or st == INVALID,
+                blocked=st == BLOCKED,
+                needs_relayout=st == NEEDS_RELAYOUT,
+            )
+
+            GL.glEnable(GL.GL_CULL_FACE)
+            GL.glEnable(GL.GL_POLYGON_OFFSET_FILL)
+            GL.glPolygonOffset(1.0, 1.0)
+            GL.glColor4f(fr, fg, fb, fa)
+            GL.glBegin(GL.GL_TRIANGLES)
+            for a, b, c in _PANEL_BOX_TRIANGLE_INDICES:
+                for i in (a, b, c):
+                    GL.glVertex3f(*corners[i])
+            GL.glEnd()
+            GL.glDisable(GL.GL_POLYGON_OFFSET_FILL)
+
+            GL.glDisable(GL.GL_CULL_FACE)
+            GL.glLineWidth(self._EDGE_LINE_WIDTH)
+            er, eg, eb, _ = PANEL_EDGE_COLOR
+            GL.glColor3f(er, eg, eb)
+            GL.glBegin(GL.GL_LINES)
+            for a, b in _PANEL_BOX_EDGE_INDICES:
+                GL.glVertex3f(*corners[a])
+                GL.glVertex3f(*corners[b])
+            GL.glEnd()
+
+        def _draw_generated_panels_gl(self) -> None:
+            """板件：遍历 ``_display_panels``，对每块调用 ``_gl_draw_panel``（全量、不丢中间块）。"""
+            panels = getattr(self, "_display_panels", None)
+            if not panels:
+                return
+            GL.glDisable(GL.GL_BLEND)
+            GL.glDepthMask(GL.GL_TRUE)
+            for panel in panels:
+                self._gl_draw_panel(panel)
+            GL.glLineWidth(1.0)
+            GL.glEnable(GL.GL_BLEND)
             GL.glEnable(GL.GL_CULL_FACE)
 
         def _draw_overlay_painter(self):
@@ -737,53 +1529,60 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
     def _paint_soft_3d(self, painter: QPainter):
         """无 OpenGL 时：顶视平面线框示意户型（与 GL 模式同一套 Room 数据）。"""
         room = getattr(self, "_room", None)
-        if not room or not room.walls:
-            painter.setPen(QPen(QColor("#909399")))
-            f = painter.font()
-            f.setPointSize(10)
-            painter.setFont(f)
-            painter.drawText(
-                self.rect().adjusted(24, 24, -24, -24),
-                int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap),
-                "暂无墙体\n在「画户型」中用直墙绘制后，切换到 3D 查看挤出房间线框",
-            )
-            return
-
-        xs: list[float] = []
-        zs: list[float] = []
-        for w in room.walls:
-            for px, pz in w.wall_polygon_points():
-                xs.append(float(px))
-                zs.append(float(pz))
-        minx, maxx = min(xs), max(xs)
-        minz, maxz = min(zs), max(zs)
+        show_env = getattr(self, "_show_user_floorplan_environment", True)
+        rect = self.rect()
         margin = 56
-        rect = self.rect().adjusted(margin, margin + 28, -margin, -margin)
-        span_x = max(maxx - minx, 1.0)
-        span_z = max(maxz - minz, 1.0)
-        scale = min(rect.width() / span_x, rect.height() / span_z)
-        ox = rect.left() + (rect.width() - span_x * scale) * 0.5
-        oz = rect.top() + (rect.height() - span_z * scale) * 0.5
+        content_rect = rect.adjusted(margin, margin + 28, -margin, -margin)
 
-        def tf(px: float, pz: float) -> QPointF:
-            return QPointF(ox + (px - minx) * scale, oz + (pz - minz) * scale)
+        if show_env:
+            if not room or not room.walls:
+                painter.setPen(QPen(QColor("#909399")))
+                f = painter.font()
+                safe_set_font_size(f, 10)
+                painter.setFont(f)
+                painter.drawText(
+                    rect.adjusted(24, 24, -24, -24),
+                    int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap),
+                    "暂无墙体\n在「画户型」中用直墙绘制后，切换到 3D 查看挤出房间线框",
+                )
+                return
 
-        painter.setPen(QPen(QColor("#5a6578"), 1.2))
-        painter.setBrush(QBrush(QColor(200, 205, 215, 100)))
-        for w in room.walls:
-            poly_pts = w.wall_polygon_points()
-            if len(poly_pts) < 3:
-                continue
-            poly = QPolygonF([tf(float(px), float(pz)) for px, pz in poly_pts])
-            painter.drawPolygon(poly)
+            xs: list[float] = []
+            zs: list[float] = []
+            for w in room.walls:
+                for px, pz in w.wall_polygon_points():
+                    xs.append(float(px))
+                    zs.append(float(pz))
+            minx, maxx = min(xs), max(xs)
+            minz, maxz = min(zs), max(zs)
+            span_x = max(maxx - minx, 1.0)
+            span_z = max(maxz - minz, 1.0)
+            scale = min(content_rect.width() / span_x, content_rect.height() / span_z)
+            ox = content_rect.left() + (content_rect.width() - span_x * scale) * 0.5
+            oz = content_rect.top() + (content_rect.height() - span_z * scale) * 0.5
 
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor("#606266")))
-        painter.drawText(
-            rect.left(),
-            max(8, rect.top() - 22),
-            f"顶视示意（软渲染）  挤出高度 {self._extrude_height:.0f} mm",
-        )
+            def tf(px: float, pz: float) -> QPointF:
+                return QPointF(ox + (px - minx) * scale, oz + (pz - minz) * scale)
+
+            painter.setPen(QPen(QColor("#5a6578"), 1.2))
+            painter.setBrush(QBrush(QColor(200, 205, 215, 100)))
+            for w in room.walls:
+                poly_pts = w.wall_polygon_points()
+                if len(poly_pts) < 3:
+                    continue
+                poly = QPolygonF([tf(float(px), float(pz)) for px, pz in poly_pts])
+                painter.drawPolygon(poly)
+
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor("#606266")))
+            _cap_font = QFont(painter.font())
+            safe_set_font_size(_cap_font, 10)
+            painter.setFont(_cap_font)
+            painter.drawText(
+                content_rect.left(),
+                max(8, content_rect.top() - 22),
+                f"顶视示意（软渲染）  挤出高度 {self._extrude_height:.0f} mm",
+            )
 
         cs = getattr(self, "_cabinet_space", None)
         if cs is not None:
@@ -791,11 +1590,12 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             dims = f"{float(cs.width):.0f} × {float(cs.height):.0f} × {float(cs.depth):.0f} mm"
             line = f"{nm}  {dims}" if nm else dims
             painter.setPen(QPen(QColor("#303133")))
-            f2 = painter.font()
-            f2.setPointSize(10)
+            f2 = QFont(painter.font())
+            safe_set_font_size(f2, 10)
             f2.setBold(True)
             painter.setFont(f2)
-            painter.drawText(self._CABINET_SPACE_HINT_X, max(8, rect.top() - 44), line)
+            top_ref = max(8, content_rect.top() - 44) if show_env else 28
+            painter.drawText(self._CABINET_SPACE_HINT_X, top_ref, line)
 
 
     def _paint_hud(self, painter: QPainter):
@@ -807,7 +1607,7 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             line = f"{nm}  {dims}" if nm else dims
             painter.setPen(QPen(QColor("#303133")))
             f = painter.font()
-            f.setPointSize(11)
+            safe_set_font_size(f, 11)
             f.setBold(True)
             painter.setFont(f)
             painter.drawText(self._CABINET_SPACE_HINT_X, 22, line)
@@ -833,7 +1633,10 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
             ((0, 0, 1), QColor("#5080e0"), "Z"),
         ]
         origin_p = QPointF(ox, oy)
-        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        _axis_lbl_font = QFont("Consolas")
+        safe_set_font_size(_axis_lbl_font, 8)
+        _axis_lbl_font.setWeight(QFont.Weight.Bold)
+        painter.setFont(_axis_lbl_font)
         for (dx, dy, dz), color, lbl in axes_def:
             end_p = mini_proj(dx, dy, dz)
             pen2 = QPen(color)
@@ -844,18 +1647,128 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
 
     # ================================================================ 鼠标 / 键盘
     def mousePressEvent(self, event):
-        self._last_pos = event.position().toPoint()
+        if DEBUG_VIEW3D:
+            print("[Mouse] press", flush=True)
+        pos = event.position()
+
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._last_pos = pos.toPoint()
+
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_mode = "orbit"
-        elif event.button() in (Qt.MouseButton.RightButton,
-                                 Qt.MouseButton.MiddleButton):
+            self.mouse_press_pos = pos.toPoint()
+            self._pressed_hover_face = self.current_hover_face
+            self._pressed_hover_space_id = self.current_hover_space_id
+            print(
+                "[INPUT] mouse press",
+                self._pressed_hover_space_id,
+                self._pressed_hover_face,
+                flush=True,
+            )
+            if not self._pressed_hover_space_id or self._pressed_hover_face is None:
+                self.pending_click = False
+                self.is_rotating = False
+                self._pressed_hover_face = None
+                self._pressed_hover_space_id = None
+            else:
+                self.pending_click = True
+                self.is_rotating = False
+
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._cabinet_space is not None
+            and _HAS_OPENGL
+        ):
+            px = float(pos.x())
+            py = float(pos.y())
+            if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                if self._try_unlock_cabinet_occ_leaf_at_screen(px, py):
+                    self._sync_cabinet_space_placement_ui_metadata()
+                    self._drag_mode = "none"
+                    self._last_pos = None
+                    event.accept()
+                    self.update()
+                    return
+            if (
+                event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and self._try_toggle_cabinet_occ_leaf_at_screen(px, py)
+            ):
+                self._sync_cabinet_space_placement_ui_metadata()
+                self._drag_mode = "none"
+                self._last_pos = None
+                event.accept()
+                self.update()
+                return
+        if event.button() in (
+            Qt.MouseButton.RightButton,
+            Qt.MouseButton.MiddleButton,
+        ):
             self._drag_mode = "pan"
         else:
             self._drag_mode = "none"
 
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event):
+        if DEBUG_VIEW3D:
+            print("[Mouse] release", flush=True)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.pending_click = False
+            self.mouse_press_pos = None
+
+            if self.is_rotating:
+                print("[INPUT] drag release", flush=True)
+                self.is_rotating = False
+                self._drag_mode = "none"
+                self._last_pos = None
+                release_pos = self._move_point(event)
+                self._update_hover(release_pos)
+                super().mouseReleaseEvent(event)
+                return
+
+            print("[INPUT] click detected", flush=True)
+
+            if (
+                self._cabinet_space is not None
+                and _HAS_OPENGL
+            ):
+                face = self._pressed_hover_face
+                space_id = self._pressed_hover_space_id
+                pos = event.position()
+                px = float(pos.x())
+                py = float(pos.y())
+                if space_id and face is not None:
+                    if self._click_command_in_flight:
+                        pass
+                    elif self.current_tool == ToolMode.SELECT:
+                        self._click_command_in_flight = True
+                        try:
+                            self._confirm_pressed_hover_click(px, py)
+                        finally:
+                            self._click_command_in_flight = False
+                    elif self.current_tool in ADD_SIDE_PANEL_TOOL_MODES:
+                        self._click_command_in_flight = True
+                        try:
+                            self._confirm_pressed_hover_click(px, py)
+                        finally:
+                            self._click_command_in_flight = False
+
+            self._drag_mode = "none"
+            self._last_pos = None
+            super().mouseReleaseEvent(event)
+            return
+
         self._drag_mode = "none"
-        self._last_pos  = None
+        self._last_pos = None
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        mgr = resolve_cabinet_interaction_manager(self)
+        if mgr is not None:
+            mgr.handle_viewport_leave(VIEWPORT_MAIN_3D, viewport=self)
+        if self._cabinet_space is not None and _HAS_OPENGL:
+            self._sync_cabinet_space_placement_ui_metadata()
+        self.update()
+        super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """双击：重置到默认视角。"""
@@ -867,28 +1780,32 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
-        if self._last_pos is None:
+        curr = self._move_point(event)
+
+        if self.pending_click and self.mouse_press_pos is not None:
+            delta = (curr - self.mouse_press_pos).manhattanLength()
+            if delta > self.rotate_threshold:
+                self.is_rotating = True
+                self.pending_click = False
+                self._drag_mode = "orbit"
+                self._last_pos = curr
+                print("[INPUT] drag rotate detected", flush=True)
+
+        if self.is_rotating:
+            self._rotate_camera(curr)
+            self.update()
+            super().mouseMoveEvent(event)
             return
-        curr = event.position().toPoint()
-        dx   = curr.x() - self._last_pos.x()
-        dy   = curr.y() - self._last_pos.y()
-        self._last_pos = curr
 
-        if self._drag_mode == "orbit":
-            self._azimuth   -= dx * 0.5
-            self._elevation  = max(-89.0, min(89.0, self._elevation + dy * 0.5))
-            self.sig_camera_changed.emit(self._azimuth, self._elevation)
+        if self._drag_mode == "pan":
+            self._pan_camera(curr)
+            self.update()
+            super().mouseMoveEvent(event)
+            return
 
-        elif self._drag_mode == "pan":
-            # 在水平面内平移，方向随方位角
-            az = math.radians(self._azimuth)
-            speed = self._distance * 0.0015
-            right = QVector3D( math.cos(az), 0, -math.sin(az))
-            up    = QVector3D(0, 1, 0)
-            self._target -= right * (dx * speed)
-            self._target += up    * (dy * speed)
-
+        self._update_hover(curr)
         self.update()
+        super().mouseMoveEvent(event)
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -897,11 +1814,14 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
         self.update()
 
     def keyPressEvent(self, event):
-        """R 键：重置视角。"""
         if event.key() == Qt.Key.Key_R:
             self.mouseDoubleClickEvent(None)
-        else:
             super().keyPressEvent(event)
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        super().keyReleaseEvent(event)
 
 
 # ================================================================ 工具函数

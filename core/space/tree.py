@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Generator, Iterator, Optional
 
-from .models import Space
+from .space_models import Space
 
 
 # ================================================================
@@ -62,6 +62,26 @@ def iter_leaves(root: Space) -> Generator[Space, None, None]:
     for node in walk_dfs(root):
         if node.is_leaf:
             yield node
+
+
+def resolve_space_root(node: Space) -> Space:
+    """沿 ``parent`` 上溯至根节点（``Topological Space Kernel`` 统一入口用）。"""
+    current = node
+    while current.parent is not None:
+        current = current.parent
+    return current
+
+
+def iter_subtree(
+    node: Space,
+    *,
+    include_self: bool = True,
+) -> Generator[Space, None, None]:
+    """从 ``node`` 起 DFS 遍历子树（含自身）。"""
+    if include_self:
+        yield node
+    for child in node.children:
+        yield from iter_subtree(child, include_self=True)
 
 
 def iter_ancestors(node: Space, include_self: bool = False) -> Generator[Space, None, None]:
@@ -213,9 +233,9 @@ def insert_between(parent: Space, child: Space, new_node: Space) -> None:
     new_node.children.append(child)
     new_node.parent = parent
     parent.children.insert(idx, new_node)
-    parent.dirty_flag = __import__(
-        "core.dirty.dirty_flags", fromlist=["DirtyFlag"]
-    ).DirtyFlag.DIRTY
+    from core.dirty.dirty_tracker import mark_space_dirty
+
+    mark_space_dirty(parent)
 
 
 def replace_node(old: Space, new: Space) -> None:
@@ -232,11 +252,18 @@ def replace_node(old: Space, new: Space) -> None:
         new.parent = parent
         old.parent = None
 
-    # 迁移子节点
+    # 迁移子节点与方向槽
     for child in old.children:
         child.parent = new
     new.children = list(old.children)
-    old.children = []
+    new.left_space = old.left_space
+    new.right_space = old.right_space
+    new.bottom_space = old.bottom_space
+    new.top_space = old.top_space
+    new.back_space = old.back_space
+    new.front_space = old.front_space
+    new.split_direction = old.split_direction
+    old.clear_children()
 
 
 def flatten(root: Space) -> list[Space]:

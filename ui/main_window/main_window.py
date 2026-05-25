@@ -44,6 +44,8 @@ from .view_3d import View3D   # OpenGL 3D 画柜子视图
 from .new_cabinet_dialog import NewCabinetDialog  # 新建柜子对话框
 from space_engine.room import Room, StraightWall
 
+from ui.qt_lifecycle import safe_set_font_size
+
 
 def _resolve_icon_dir() -> str:
     """定位 icons 目录。
@@ -141,7 +143,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         # 柜体设计模式全屏覆盖层（默认隐藏）
-        from cabinet_view.cabinet_design_view import CabinetDesignView
+        from view.cabinet_view.cabinet_design_view import CabinetDesignView
         self._cabinet_design_view = CabinetDesignView(self)
         self._cabinet_design_view.hide()
         self._cabinet_design_view.sig_finish.connect(self._on_cabinet_finish)
@@ -167,8 +169,7 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 柜体模式进入/退出
     def _enter_cabinet_mode(self, project):
-        """进入柜体设计模式：委托 CabinetDesignView；先建立根 Space 与 3D 逻辑空间视图。"""
-        self.canvas.set_cabinet_root_space(project)
+        """进入柜体设计模式：委托 CabinetDesignView；根 Space 仅经 ``SET_ROOT_SPACE`` 命令写入。"""
         self._cabinet_design_view.enter(
             canvas         = self.canvas,
             menu_bar       = self.menu_bar,
@@ -179,7 +180,7 @@ class MainWindow(QMainWindow):
         )
 
         # ── 左侧组件面板（CabinetAssembler）────────────────────────────
-        from cabinet_view.cabinet_assembler import (
+        from view.cabinet_view.cabinet_assembler import (
             CabinetAssembler,
             assembler_icon_status_label,
         )
@@ -203,7 +204,7 @@ class MainWindow(QMainWindow):
 
         # ── 右侧属性面板 ──────────────────────────────────────────────
         # 懒创建：首次进入时才实例化，后续复用（仅重置数据）
-        from cabinet_view.cabinet_property_panel import CabinetPropertyPanel
+        from view.cabinet_view.cabinet_property_panel import CabinetPropertyPanel
         if self._prop_panel is None:
             self._prop_panel = CabinetPropertyPanel(
                 parent = self.canvas,     # 叠加在 canvas 上
@@ -230,6 +231,13 @@ class MainWindow(QMainWindow):
         d = float(getattr(project, "cabinet_depth",   600))
         self._prop_panel.set_dimensions(w, h, d)
         self._prop_panel.prepare_for_cabinet_mode()
+
+        # 柜体命令链：UI 信号 → CommandDispatcher（结构解耦，不改变原有面板信号语义）
+        self._cabinet_design_view.bind_cabinet_command_ui(
+            self._assembler_panel,
+            self._prop_panel,
+        )
+        self._cabinet_design_view.dispatch_set_root_space()
 
         # 定位并显示（两面板叠在 canvas 右侧、彼此紧挨；parent 均为 canvas）
         self._layout_prop_panel()
@@ -1349,12 +1357,13 @@ class MainWindow(QMainWindow):
             CabinetBuilder.build_frame(body)
             project.add_body(body)
         else:
-            from types import SimpleNamespace
-            project = SimpleNamespace(
-                name           = dlg.product_name,
-                cabinet_width  = dlg.cabinet_width,
-                cabinet_height = dlg.cabinet_height,
-                cabinet_depth  = dlg.cabinet_depth,
+            from core.cabinet.cabinet_model import Cabinet
+
+            project = Cabinet(
+                name=dlg.product_name,
+                cabinet_width=float(dlg.cabinet_width),
+                cabinet_height=float(dlg.cabinet_height),
+                cabinet_depth=float(dlg.cabinet_depth),
             )
         self._enter_cabinet_mode(project)
 
@@ -1546,7 +1555,8 @@ class _GridGraphicsView(QGraphicsView):
         self.viewport().setAutoFillBackground(False)
         self._zoom   = 1.0
         self._space  = False
-        self._label_font = QFont("Consolas", 8)
+        self._label_font = QFont("Consolas")
+        safe_set_font_size(self._label_font, 8)
 
     # ── 背景绘制 ──────────────────────────────────────────────────
     def drawBackground(self, painter: QPainter, rect):
@@ -2035,24 +2045,13 @@ class _Canvas2DWorkspace(QWidget):
         if show_cabinet_bar:
             self._cabinet_bar.raise_()
 
-    def set_cabinet_root_space(self, project) -> None:
-        """新建柜子确定后：生成根 `Space` 并在主 `View3D` 中绘制（与画柜子 3D 同一背景）。"""
-        from ui.cabinet_space.param_space_gl_view import make_root_cabinet_space
-
-        w = float(getattr(project, "cabinet_width", 2400))
-        h = float(getattr(project, "cabinet_height", 2200))
-        d = float(getattr(project, "cabinet_depth", 600))
-        nm = getattr(project, "name", None) or ""
-        root = make_root_cabinet_space(nm, w, h, d)
-        try:
-            setattr(project, "root_space", root)
-        except Exception:
-            pass
-        self._3d_view.set_cabinet_space(root)
-
     def clear_cabinet_param_space(self) -> None:
         """退出柜体设计：取消主 3D 视图中的逻辑空间盒。"""
         self._3d_view.set_cabinet_space(None)
+
+    def refresh_cabinet_view(self) -> None:
+        """柜体命令执行后刷新主 3D 视图（委托 View3D.refresh，供 CommandDispatcher 上下文使用）。"""
+        self._3d_view.refresh()
 
     # ---------------------------------------------------------------- 布局
     def resizeEvent(self, event):

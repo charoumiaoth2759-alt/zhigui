@@ -253,6 +253,8 @@ class CabinetCalculator:
 # ==============================================================================
 from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtGui import QFont
+
+from ui.qt_lifecycle import safe_set_font_size
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
     QToolButton, QMenu, QTabWidget, QTreeWidget, QTreeWidgetItem,
@@ -588,7 +590,10 @@ class BomParseDialog(QDialog):
         self.tree.clear()
         for room_data in self._order_data.get("products", []):
             room_item = QTreeWidgetItem(["\u25a1 " + room_data.get("room", "\u623f\u95f4")])
-            room_item.setFont(0, QFont("", -1, QFont.Weight.Bold))
+            _hdr_font = QFont()
+            safe_set_font_size(_hdr_font, 11)
+            _hdr_font.setBold(True)
+            room_item.setFont(0, _hdr_font)
             self.tree.addTopLevelItem(room_item)
             for prod in room_data.get("items", []):
                 label = "\u25a1 {}  /  {}  =  {}".format(

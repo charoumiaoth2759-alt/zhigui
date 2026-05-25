@@ -54,6 +54,8 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QPushButton, QWidget,
 )
 
+from ui.qt_lifecycle import safe_set_font_point_size_f, safe_set_font_size
+
 
 def _diban_pixmap_path() -> Path:
     return Path(__file__).resolve().parents[2] / "icons" / "diban.jpg"
@@ -249,7 +251,7 @@ class FloorItem(QGraphicsPathItem):
         dim_pen.setCosmetic(True)
         # 字体用 pointSizeF = txt_h（场景单位），不用 painter.scale
         dim_font = QFont("Consolas")
-        dim_font.setPointSizeF(max(txt_h * 0.75, 0.5))
+        safe_set_font_point_size_f(dim_font, max(txt_h * 0.75, 1.0))
         painter.setFont(dim_font)
         painter.setPen(dim_pen)
 
@@ -282,7 +284,7 @@ class FloorItem(QGraphicsPathItem):
 
         # ── 5. 房间名 + 面积居中标注 ──────────────────────────────
         lbl_font = QFont("Arial")
-        lbl_font.setPointSizeF(max(txt_h * 1.0, 0.5))
+        safe_set_font_point_size_f(lbl_font, max(txt_h * 1.0, 1.0))
         lbl_font.setBold(True)
         painter.setFont(lbl_font)
         lbl_pen = QPen(self.LABEL_CLR)
@@ -416,7 +418,8 @@ class View2D(QGraphicsView):
         # 状态
         self._zoom          = 1.0
         self._space_pressed = False
-        self._label_font    = QFont("Consolas", 8)
+        self._label_font = QFont("Consolas")
+        safe_set_font_size(self._label_font, 8)
         self._camera_initialized = False
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
@@ -811,6 +814,7 @@ class View2D(QGraphicsView):
         num_item = sc.addSimpleText(num_text)
         num_font = QFont("Consolas")
         num_font.setBold(True)
+        safe_set_font_size(num_font, 10)
         num_item.setFont(num_font)
         num_item.setScale(font_h)
         num_item.setBrush(QBrush(QColor(255, 255, 255, 255)))
@@ -842,6 +846,7 @@ class View2D(QGraphicsView):
         # ── mm 单位标签（灰色，紧跟蓝框右侧）───────────────────────
         mm_item = sc.addSimpleText("mm")
         mm_font = QFont("Arial")
+        safe_set_font_size(mm_font, 9)
         mm_item.setFont(mm_font)
         mm_scale = font_h * 0.85
         mm_item.setScale(mm_scale)
@@ -1107,6 +1112,7 @@ class View2D(QGraphicsView):
         num_item = sc.addSimpleText(num_text)
         num_font = QFont("Consolas")
         num_font.setBold(True)
+        safe_set_font_size(num_font, 10)
         num_item.setFont(num_font)
         num_item.setScale(font_h)
         num_item.setBrush(QBrush(QColor(255, 255, 255)))
@@ -1145,6 +1151,7 @@ class View2D(QGraphicsView):
         # mm 单位
         mm_item = sc.addSimpleText("mm")
         mm_font = QFont("Arial")
+        safe_set_font_size(mm_font, 9)
         mm_item.setFont(mm_font)
         mm_item.setScale(font_h * 0.85)
         mm_item.setBrush(QBrush(QColor(80, 100, 130, 200)))
@@ -1516,7 +1523,9 @@ def _adaptive_grid_for_scale(scale: float) -> tuple[int, int]:
 
 
 def _draw_grid_labels(painter: QPainter, rect: QRectF, major: int) -> None:
-    painter.setFont(QFont("Consolas", 8))
+    _lf = QFont("Consolas")
+    safe_set_font_size(_lf, 8)
+    painter.setFont(_lf)
     pen = QPen(View2D.LABEL_COLOR)
     pen.setCosmetic(True)
     painter.setPen(pen)

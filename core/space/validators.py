@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
-from .models import Space
+from .space_models import Space
 from .tree import walk_dfs, iter_leaves, max_depth, get_path_names
 from ..constants.dimensions import (
     MIN_SPACE_WIDTH,
@@ -192,7 +192,7 @@ def check_children_sum(root: Space) -> ValidationResult:
     误差超过公差时报 ERROR。
     """
     from ..constants.tolerance import DIMENSION_TOLERANCE
-    from ..constants.enums import SplitDirection
+    from ..constants.enums import is_split_along_x, is_split_along_y, is_split_along_z
 
     result = ValidationResult()
 
@@ -202,15 +202,15 @@ def check_children_sum(root: Space) -> ValidationResult:
 
         direction = node.split_direction
 
-        if direction == SplitDirection.HORIZONTAL:   # 水平切：子节点 width 求和
+        if is_split_along_x(direction):   # SPLIT_X（旧名 HORIZONTAL）：子节点 width 求和
             total = sum(c.width for c in node.children)
             expected = node.width
             dim_name = "width"
-        elif direction == SplitDirection.VERTICAL:   # 垂直切：子节点 height 求和
+        elif is_split_along_y(direction):   # SPLIT_Y（旧名 VERTICAL）：子节点 height 求和
             total = sum(c.height for c in node.children)
             expected = node.height
             dim_name = "height"
-        elif direction == SplitDirection.DEPTH:      # 深度切：子节点 depth 求和
+        elif is_split_along_z(direction):   # SPLIT_Z（旧名 DEPTH）：子节点 depth 求和
             total = sum(c.depth for c in node.children)
             expected = node.depth
             dim_name = "depth"
@@ -241,7 +241,7 @@ def check_overlap(root: Space) -> ValidationResult:
     对同一父节点下的所有子节点，按分割方向检测区间是否有交叉。
     只检测直接子节点（一级），不递归（递归由框架逐层调用保证）。
     """
-    from ..constants.enums import SplitDirection
+    from ..constants.enums import is_split_along_x, is_split_along_y, is_split_along_z
     from ..constants.tolerance import DIMENSION_TOLERANCE
 
     result = ValidationResult()
@@ -253,11 +253,11 @@ def check_overlap(root: Space) -> ValidationResult:
         direction = node.split_direction
         children = node.children
 
-        if direction == SplitDirection.HORIZONTAL:
+        if is_split_along_x(direction):
             intervals = [(c, c.x, c.x + c.width) for c in children]
-        elif direction == SplitDirection.VERTICAL:
+        elif is_split_along_y(direction):
             intervals = [(c, c.y, c.y + c.height) for c in children]
-        elif direction == SplitDirection.DEPTH:
+        elif is_split_along_z(direction):
             intervals = [(c, c.z, c.z + c.depth) for c in children]
         else:
             continue
@@ -307,7 +307,7 @@ def check_position_consistency(root: Space) -> ValidationResult:
     子节点的起始坐标应紧贴父节点原点或上一个兄弟节点的末端。
     误差超过公差时报 WARNING（位置由 splitter 计算，ERROR 会在 check_overlap 里覆盖）。
     """
-    from ..constants.enums import SplitDirection
+    from ..constants.enums import is_split_along_x, is_split_along_y, is_split_along_z
     from ..constants.tolerance import DIMENSION_TOLERANCE
 
     result = ValidationResult()
@@ -319,7 +319,7 @@ def check_position_consistency(root: Space) -> ValidationResult:
         direction = node.split_direction
         children = node.children
 
-        if direction == SplitDirection.HORIZONTAL:
+        if is_split_along_x(direction):
             cursor = node.x
             for child in children:
                 diff = abs(child.x - cursor)
@@ -331,7 +331,7 @@ def check_position_consistency(root: Space) -> ValidationResult:
                     ))
                 cursor += child.width
 
-        elif direction == SplitDirection.VERTICAL:
+        elif is_split_along_y(direction):
             cursor = node.y
             for child in children:
                 diff = abs(child.y - cursor)
@@ -343,7 +343,7 @@ def check_position_consistency(root: Space) -> ValidationResult:
                     ))
                 cursor += child.height
 
-        elif direction == SplitDirection.DEPTH:
+        elif is_split_along_z(direction):
             cursor = node.z
             for child in children:
                 diff = abs(child.z - cursor)
@@ -459,15 +459,173 @@ def check_leaf_usability(root: Space) -> ValidationResult:
     return result
 
 
+def check_parent_child_consistency(root: Space) -> ValidationResult:
+    """
+    父子一致性：双向链接、切分方向与子节点、子盒在父盒内。
+    """
+    from ..constants.enums import SplitDirection
+    from ..constants.tolerance import DIMENSION_TOLERANCE
+
+    result = ValidationResult()
+    result.merge(check_tree_links(root))
+
+    tol = DIMENSION_TOLERANCE
+
+    for parent in walk_dfs(root):
+        children = list(parent.children)
+
+        if children and parent.split_direction == SplitDirection.NONE:
+            result.add(_error(
+                "TOPOLOGY_SPLIT_DIRECTION_MISSING",
+                "有子节点但 split_direction 为 NONE，子节点布局未定义",
+                parent,
+                children_count=len(children),
+            ))
+
+        if not parent.is_leaf and not children:
+            result.add(_error(
+                "TOPOLOGY_INTERNAL_NO_CHILDREN",
+                "非叶节点 children 为空",
+                parent,
+            ))
+
+        px, py, pz = parent.x, parent.y, parent.z
+        p_right = px + parent.width
+        p_top = py + parent.height
+        p_front = pz + parent.depth
+
+        for child in children:
+            checks = [
+                ("x", child.x, child.x + child.width, px, p_right),
+                ("y", child.y, child.y + child.height, py, p_top),
+                ("z", child.z, child.z + child.depth, pz, p_front),
+            ]
+            for axis, lo, hi, p_lo, p_hi in checks:
+                if lo < p_lo - tol:
+                    result.add(_error(
+                        "TOPOLOGY_CHILD_OUTSIDE_PARENT",
+                        f"子节点 {axis} 起点 {lo:.2f} 低于父盒 {p_lo:.2f}",
+                        child,
+                        axis=axis,
+                        child_lo=lo,
+                        parent_lo=p_lo,
+                    ))
+                if hi > p_hi + tol:
+                    result.add(_error(
+                        "TOPOLOGY_CHILD_OUTSIDE_PARENT",
+                        f"子节点 {axis} 终点 {hi:.2f} 超出父盒 {p_hi:.2f}",
+                        child,
+                        axis=axis,
+                        child_hi=hi,
+                        parent_hi=p_hi,
+                    ))
+
+    return result
+
+
+def check_broken_topology(root: Space) -> ValidationResult:
+    """
+    断裂拓扑：重复 id、邻接链不对称、切分方向与叶/内节点矛盾。
+    """
+    from ..constants.enums import SplitDirection
+
+    result = ValidationResult()
+    seen: dict[str, Space] = {}
+
+    _NEIGHBOR_PAIRS = (
+        ("left_neighbor", "right_neighbor"),
+        ("bottom_neighbor", "top_neighbor"),
+        ("back_neighbor", "front_neighbor"),
+    )
+
+    for node in walk_dfs(root):
+        nid = str(node.id)
+        if nid in seen:
+            result.add(_error(
+                "TOPOLOGY_DUPLICATE_ID",
+                f"重复空间 id（与 '{seen[nid].name or seen[nid].id[:8]}' 冲突）",
+                node,
+                duplicate_of=seen[nid].id,
+            ))
+        else:
+            seen[nid] = node
+
+        if node.is_leaf and node.split_direction != SplitDirection.NONE:
+            result.add(_warning(
+                "TOPOLOGY_LEAF_HAS_SPLIT_DIRECTION",
+                "叶节点不应保留 split_direction",
+                node,
+                split_direction=node.split_direction.value,
+            ))
+
+        for fwd_attr, rev_attr in _NEIGHBOR_PAIRS:
+            nbr = getattr(node, fwd_attr, None)
+            if nbr is None:
+                continue
+            back = getattr(nbr, rev_attr, None)
+            if back is not node:
+                result.add(_error(
+                    "TOPOLOGY_NEIGHBOR_ASYMMETRIC",
+                    f"{fwd_attr} 与对端 {rev_attr} 未互指",
+                    node,
+                    neighbor_id=getattr(nbr, "id", None),
+                    forward=fwd_attr,
+                    reverse=rev_attr,
+                ))
+
+    return result
+
+
+def check_tree_links(root: Space) -> ValidationResult:
+    """
+    父子双向链接一致性：``children`` 列表与 ``parent`` 指针互指。
+    """
+    result = ValidationResult()
+
+    for node in walk_dfs(root):
+        for child in list(node.children):
+            if child.parent is not node:
+                result.add(_error(
+                    "TREE_PARENT_MISMATCH",
+                    f"子节点 parent 未指向当前父节点（child.parent={child.parent!r}）",
+                    child,
+                    parent_id=node.id,
+                ))
+        par = node.parent
+        if par is not None and node not in par.children:
+            result.add(_error(
+                "TREE_CHILD_MISSING",
+                "节点不在 parent.children 中",
+                node,
+                parent_id=par.id,
+            ))
+
+    return result
+
+
 # ================================================================
 # 主入口：完整校验流水线
 # ================================================================
+
+# Topological Space Kernel — ``SpaceConsistencyManager.validate`` 默认子集
+# 1. parent-child consistency  2. invalid size  3. overlapping children  4. broken topology
+TOPOLOGY_CHECKS = [
+    check_parent_child_consistency,
+    check_dimensions,
+    check_overlap,
+    check_broken_topology,
+    check_children_sum,
+    check_position_consistency,
+    check_isolated,
+    check_tree_depth,
+]
 
 # 校验步骤列表，按依赖顺序排列
 # 格式：(校验函数, 描述)
 _CHECKS = [
     (check_dimensions,           "尺寸越界"),
     (check_constraints,          "约束合法性"),
+    (check_tree_links,           "父子链接"),
     (check_children_sum,         "子节点求和"),
     (check_overlap,              "子节点重叠"),
     (check_position_consistency, "位置一致性"),
