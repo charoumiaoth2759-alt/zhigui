@@ -66,7 +66,7 @@ class Main3DHoverDetector:
             screen_y,
             constraint_engine=engine,
             target_face=target_face,
-            margin_mm=120.0,
+            margin_mm=180.0,
             world_to_screen=w2s if callable(w2s) else None,
         )
 
@@ -98,7 +98,7 @@ class ParamSpaceHoverDetector:
             screen_y,
             constraint_engine=cabinet_space_constraint_engine(),
             target_face=target_face,
-            margin_mm=120.0,
+            margin_mm=180.0,
             world_to_screen=lambda wx, wy, wz: gl_world_to_screen_px(gl, wx, wy, wz),
         )
 

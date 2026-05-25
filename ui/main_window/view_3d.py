@@ -217,7 +217,7 @@ class View3D(QOpenGLWidget if _HAS_OPENGL else QWidget):
 
     # 线框 / 板件黑棱等边线线宽（≤2，避免部分 GPU 异常）
     _EDGE_LINE_WIDTH = 1.2
-    _ENABLE_CAMERA_ORBIT = False  # 画柜子模式禁用左键轨道旋转
+    _ENABLE_CAMERA_ORBIT = True  # 画柜子模式允许左键轨道旋转（拖拽超阈值触发）
     _SHOW_COORDINATE_AXES = False  # 隐藏 3D 视图中的坐标线（世界轴 + 左下角坐标轴 HUD）
 
     def __init__(self, parent=None):
